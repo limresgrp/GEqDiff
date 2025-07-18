@@ -1,0 +1,2 @@
+# GEqDiff
+Graph Equivariant Diffusion
