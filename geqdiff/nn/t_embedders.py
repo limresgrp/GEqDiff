@@ -26,7 +26,7 @@ class SinusoidalPositionEmbedding(torch.nn.Module):
         # The original paper uses 10000 as the base.
         # Shape: (half_dim,)
         freqs = torch.exp(
-            -torch.log(torch.tensor(10000.0)) * torch.arange(self.half_dim, device=device) / self.half_dim
+            -torch.log(torch.tensor(10000.0, device=device)) * torch.arange(self.half_dim, device=device) / self.half_dim
         )
         
         # Project timesteps onto the frequencies

@@ -9,15 +9,13 @@ try:
 except ImportError:
     mda = None
 
-# --- Import necessary classes from your files ---
-# Import the new, refactored classes
 from geqtrain.scripts.evaluate import load_model
 from geqdiff.data import AtomicDataDict
 from geqdiff.utils import NoiseScheduler, Sampler, DDPMSampler, DDIMSampler, center_pos
 
 # --- Helper functions (Unchanged) ---
 
-def load_structure(filepath: str, device: str, selection: str = "all"):
+def load_structure(filepath: str, selection: str = "all"):
     """Loads a structure using MDAnalysis, applies a selection, and extracts data."""
     if mda is None:
         raise ImportError("MDAnalysis is required to read structure files. Please install it: `pip install MDAnalysis`")
@@ -33,14 +31,14 @@ def load_structure(filepath: str, device: str, selection: str = "all"):
     
     print(f"Applied selection '{selection}', using {len(atom_group)} out of {len(universe.atoms)} atoms.")
 
-    positions = torch.tensor(atom_group.positions, dtype=torch.float32, device=device)
+    positions = torch.tensor(atom_group.positions, dtype=torch.float32)
     try:
         elements = [atom.element for atom in atom_group]
     except:
         elements = [atom.type for atom in atom_group]
     
     element_map = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'S': 4, 'F': 5, 'Cl': 6, 'Br': 7, 'I': 8}
-    node_types = torch.tensor([element_map.get(el, -1) for el in elements], dtype=torch.long, device=device)
+    node_types = torch.tensor([element_map.get(el, -1) for el in elements], dtype=torch.long)
 
     if (node_types == -1).any():
         unknown_elements = set(el for el, nt in zip(elements, node_types) if nt == -1)
@@ -89,6 +87,7 @@ def sample_from_model(
     """
     model.to(device)
     model.eval()
+    sampler.to(device)
 
     print(f"Starting sampling on device: {device}")
     print(f"Using sampler: {sampler.__class__.__name__} with r_max = {r_max:.2f}")
@@ -122,12 +121,13 @@ def sample_from_model(
         print(f"Using DDPM with {len(time_steps)} steps from t={start_step}.")
 
     # 3. The main reverse diffusion loop
+
     for i, t in enumerate(tqdm(time_steps, desc="Reverse Diffusion")):
         edge_index = build_edge_index(x_t, r_max)
 
         data = {
             AtomicDataDict.POSITIONS_KEY: x_t,
-            AtomicDataDict.NODE_TYPE_KEY: node_types,
+            AtomicDataDict.NODE_TYPE_KEY: node_types.to(device),
             AtomicDataDict.BATCH_KEY: torch.zeros(num_atoms, dtype=torch.long, device=device),
             AtomicDataDict.EDGE_INDEX_KEY: edge_index,
             AtomicDataDict.T_SAMPLED_KEY: torch.tensor([t], device=device)
@@ -161,7 +161,7 @@ def main():
     parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
     # Updated arguments for sampler and schedule
-    parser.add_argument("--sampler", type=str, default="ddim", choices=["ddpm", "ddim"], help="Sampler to use.")
+    parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim"], help="Sampler to use.")
     parser.add_argument("--schedule_type", type=str, default="linear", choices=["linear", "cosine"], help="Noise schedule to use.")
     parser.add_argument("-T", "--Tmax", type=int, default=1000, help="Maximum number of diffusion timesteps.")
     parser.add_argument("-f", "--field", type=str, default="noise", help="Out field where model saves predicted noise.")
@@ -173,7 +173,7 @@ def main():
     # --- 1. Load Model and Initial Structure ---
     
     model, config = load_model(args.model, device=args.device)
-    initial_pos, node_types, elements, atom_group = load_structure(args.input_structure, args.device, selection=args.selection)
+    initial_pos, node_types, elements, atom_group = load_structure(args.input_structure, selection=args.selection)
     num_atoms = len(initial_pos)
     
     try:
@@ -195,7 +195,6 @@ def main():
         raise ValueError(f"Unknown sampler: {args.sampler}")
 
     # --- 3. Run Sampling ---
-    
     final_positions, trajectory = sample_from_model(
         model=model,
         sampler=sampler, # Pass the sampler object
