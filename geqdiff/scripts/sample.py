@@ -1,0 +1,237 @@
+import torch
+import numpy as np
+from tqdm import tqdm
+from pathlib import Path
+import argparse
+
+try:
+    import MDAnalysis as mda
+except ImportError:
+    mda = None
+
+# --- Import necessary classes from your files ---
+# Import the new, refactored classes
+from geqtrain.scripts.evaluate import load_model
+from geqdiff.data import AtomicDataDict
+from geqdiff.utils import NoiseScheduler, Sampler, DDPMSampler, DDIMSampler, center_pos
+
+# --- Helper functions (Unchanged) ---
+
+def load_structure(filepath: str, device: str, selection: str = "all"):
+    """Loads a structure using MDAnalysis, applies a selection, and extracts data."""
+    if mda is None:
+        raise ImportError("MDAnalysis is required to read structure files. Please install it: `pip install MDAnalysis`")
+    
+    try:
+        universe = mda.Universe(filepath)
+    except Exception as e:
+        raise IOError(f"Could not read structure file {filepath}: {e}")
+
+    atom_group = universe.select_atoms(selection)
+    if len(atom_group) == 0:
+        raise ValueError(f"The selection '{selection}' resulted in 0 atoms. Please check your selection string.")
+    
+    print(f"Applied selection '{selection}', using {len(atom_group)} out of {len(universe.atoms)} atoms.")
+
+    positions = torch.tensor(atom_group.positions, dtype=torch.float32, device=device)
+    try:
+        elements = [atom.element for atom in atom_group]
+    except:
+        elements = [atom.type for atom in atom_group]
+    
+    element_map = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'S': 4, 'F': 5, 'Cl': 6, 'Br': 7, 'I': 8}
+    node_types = torch.tensor([element_map.get(el, -1) for el in elements], dtype=torch.long, device=device)
+
+    if (node_types == -1).any():
+        unknown_elements = set(el for el, nt in zip(elements, node_types) if nt == -1)
+        print(f"Warning: Unknown elements found and mapped to -1: {unknown_elements}")
+
+    return center_pos(positions), node_types, elements, atom_group
+
+def build_edge_index(positions: torch.Tensor, cutoff: float):
+    """Builds a PyG-style edge_index for a single molecule."""
+    dist_matrix = torch.cdist(positions, positions)
+    mask = (dist_matrix <= cutoff) & (dist_matrix > 0)
+    edge_index = mask.nonzero(as_tuple=False).t().contiguous()
+    return edge_index
+
+def save_trajectory_with_mda(output_path: str, atom_group: mda.core.groups.AtomGroup, trajectory_coords: list):
+    """Saves a trajectory using MDAnalysis."""
+    if mda is None:
+        raise ImportError("MDAnalysis is required to save trajectories in XTC/DCD format.")
+        
+    print(f"Saving trajectory to {output_path}...")
+    with mda.Writer(output_path, n_atoms=atom_group.n_atoms) as writer:
+        for positions in trajectory_coords:
+            atom_group.positions = positions
+            writer.write(atom_group)
+    print(f"Successfully saved MDAnalysis trajectory to: {output_path}")
+
+# --- Main Sampling Function (Updated) ---
+
+@torch.no_grad()
+def sample_from_model(
+    model: torch.nn.Module,
+    sampler: Sampler, # Takes a Sampler object now
+    device: str,
+    r_max: float,
+    num_atoms: int,
+    node_types: torch.Tensor,
+    initial_pos: torch.Tensor = None,
+    t_init: int = None,
+    ddim_steps: int = 50,
+    ddim_eta: float = 0.0,
+    save_trajectory: bool = False,
+    field: str = 'noise',
+):
+    """
+    Main function to perform reverse diffusion and generate a sample.
+    """
+    model.to(device)
+    model.eval()
+
+    print(f"Starting sampling on device: {device}")
+    print(f"Using sampler: {sampler.__class__.__name__} with r_max = {r_max:.2f}")
+
+    # 1. Define the starting point x_t
+    T_max = sampler.T
+    if initial_pos is not None and t_init is not None:
+        if t_init >= T_max:
+            raise ValueError(f"t_init ({t_init}) must be less than T_max ({T_max})")
+        print(f"Starting from provided structure, noising to t={t_init}...")
+        
+        x_0 = initial_pos.to(device)
+        noise = torch.randn_like(x_0)
+        # Use the sampler's scheduler for the forward process
+        alpha_t, sigma_t = sampler.scheduler(torch.tensor([t_init], device=device))
+        x_t = center_pos(alpha_t * x_0 + sigma_t * noise)
+        start_step = t_init
+    else:
+        print("Starting from pure random noise...")
+        x_t = center_pos(torch.randn((num_atoms, 3), device=device))
+        start_step = T_max - 1
+
+    trajectory = [x_t.cpu().numpy()] if save_trajectory else []
+
+    # 2. Define the timestep sequence for the reverse process
+    if isinstance(sampler, DDIMSampler):
+        time_steps = np.linspace(0, start_step, ddim_steps, dtype=int)[::-1].copy()
+        print(f"Using DDIM with {len(time_steps)} steps from t={start_step}.")
+    else: # DDPMSampler
+        time_steps = np.arange(start_step + 1)[::-1].copy()
+        print(f"Using DDPM with {len(time_steps)} steps from t={start_step}.")
+
+    # 3. The main reverse diffusion loop
+    for i, t in enumerate(tqdm(time_steps, desc="Reverse Diffusion")):
+        edge_index = build_edge_index(x_t, r_max)
+
+        data = {
+            AtomicDataDict.POSITIONS_KEY: x_t,
+            AtomicDataDict.NODE_TYPE_KEY: node_types,
+            AtomicDataDict.BATCH_KEY: torch.zeros(num_atoms, dtype=torch.long, device=device),
+            AtomicDataDict.EDGE_INDEX_KEY: edge_index,
+            AtomicDataDict.T_SAMPLED_KEY: torch.tensor([t], device=device)
+        }
+
+        out_dict = model(data)
+        eps_pred = out_dict[field]
+
+        # Call the sampler's step method
+        if isinstance(sampler, DDIMSampler):
+            t_prev = time_steps[i + 1] if i < len(time_steps) - 1 else -1 # t_prev=-1 indicates the end
+            x_t = sampler.step(x_t, t, t_prev, eps_pred, eta=ddim_eta)
+        else: # DDPMSampler
+            x_t = sampler.step(x_t, t, eps_pred)
+            
+        x_t = center_pos(x_t)
+
+        if save_trajectory:
+            trajectory.append(x_t.cpu().numpy())
+
+    print("Sampling complete.")
+    return x_t.cpu().numpy(), trajectory
+
+# --- Script Entry Point (Updated) ---
+
+def main():
+    parser = argparse.ArgumentParser(description="GeqDiff Sampling Script")
+    parser.add_argument("-m", "--model", type=str, required=True, help="Path to deployed model or .pth model weights.")
+    parser.add_argument("-i", "--input_structure", type=str, required=True, help="Path to an input structure file (PDB, GRO, etc.).")
+    parser.add_argument("--selection", type=str, default="all", help="MDAnalysis selection string (e.g., 'not name H*').")
+    parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
+    # Updated arguments for sampler and schedule
+    parser.add_argument("--sampler", type=str, default="ddim", choices=["ddpm", "ddim"], help="Sampler to use.")
+    parser.add_argument("--schedule_type", type=str, default="linear", choices=["linear", "cosine"], help="Noise schedule to use.")
+    parser.add_argument("-T", "--Tmax", type=int, default=1000, help="Maximum number of diffusion timesteps.")
+    parser.add_argument("-f", "--field", type=str, default="noise", help="Out field where model saves predicted noise.")
+    parser.add_argument("--ddim_steps", type=int, default=50, help="Number of steps for DDIM sampling.")
+    parser.add_argument("--save_trajectory", action="store_true", help="Save the full trajectory.")
+    parser.add_argument("--traj_format", type=str, default="npz", choices=["npz", "xtc", "dcd"], help="Format for the saved trajectory.")
+    args = parser.parse_args()
+
+    # --- 1. Load Model and Initial Structure ---
+    
+    model, config = load_model(args.model, device=args.device)
+    initial_pos, node_types, elements, atom_group = load_structure(args.input_structure, args.device, selection=args.selection)
+    num_atoms = len(initial_pos)
+    
+    try:
+        r_max = config[AtomicDataDict.R_MAX_KEY]
+    except KeyError:
+        raise KeyError(f"Could not find '{AtomicDataDict.R_MAX_KEY}' in the model's config.")
+
+    # --- 2. Initialize Scheduler and Sampler ---
+    
+    # First, create the noise schedule
+    scheduler = NoiseScheduler(T=args.Tmax, schedule_type=args.schedule_type)
+    
+    # Then, create the sampler and pass the scheduler to it
+    if args.sampler == "ddpm":
+        sampler = DDPMSampler(scheduler)
+    elif args.sampler == "ddim":
+        sampler = DDIMSampler(scheduler)
+    else:
+        raise ValueError(f"Unknown sampler: {args.sampler}")
+
+    # --- 3. Run Sampling ---
+    
+    final_positions, trajectory = sample_from_model(
+        model=model,
+        sampler=sampler, # Pass the sampler object
+        device=args.device,
+        r_max=r_max,
+        num_atoms=num_atoms,
+        node_types=node_types,
+        initial_pos=initial_pos,
+        t_init=args.t_init,
+        ddim_steps=args.ddim_steps,
+        save_trajectory=args.save_trajectory,
+        field=args.field,
+    )
+
+    # --- 4. Save Results ---
+    
+    output_dir = Path("sampling_results")
+    output_dir.mkdir(exist_ok=True)
+    
+    output_file = output_dir / f"generated_molecule_{args.sampler}_{args.schedule_type}.xyz"
+    
+    with open(output_file, "w") as f:
+        f.write(f"{num_atoms}\n")
+        f.write(f"Generated by {args.sampler} sampler with {args.schedule_type} schedule. Selection: '{args.selection}'\n")
+        for i, pos in enumerate(final_positions):
+            f.write(f"{elements[i]}   {pos[0]:.4f}   {pos[1]:.4f}   {pos[2]:.4f}\n")
+            
+    print(f"Successfully saved generated coordinates to: {output_file}")
+
+    if args.save_trajectory:
+        traj_file = output_dir / f"trajectory_{args.sampler}_{args.schedule_type}.{args.traj_format}"
+        if args.traj_format == "npz":
+            np.savez_compressed(traj_file, trajectory=np.array(trajectory))
+            print(f"Successfully saved trajectory to: {traj_file}")
+        else:
+            save_trajectory_with_mda(str(traj_file), atom_group, trajectory)
+
+if __name__ == "__main__":
+    main()

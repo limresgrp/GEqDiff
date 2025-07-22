@@ -1,0 +1,31 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geqdiff"
+dynamic = ["version"]
+description = "GEqDiff is an open-source framework for building, training and deplying E(3)-equivariant graph based diffusion models, taking advantage of GEqTrain training framework."
+authors = [
+    {name = "Marco Nobile, Daniele Angioletti"},
+]
+requires-python = ">=3.8"
+readme = "README.md"
+dependencies = [
+    # "geqtrain",
+]
+
+[project.urls]
+"Repository" = "https://github.com/limresgrp/GEqDiff"
+
+[project.scripts]
+geqdiff-dataset = "geqdiff.scripts.build_dataset:main"
+geqdiff-sample = "geqdiff.scripts.sample:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "geqdiff._version.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["geqdiff", "geqdiff.*"]
