@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 from e3nn import o3
 from e3nn.util.jit import compile_mode
@@ -15,6 +16,7 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
         self,
         out_field: str = AtomicDataDict.NOISE_KEY,
         Tmax: int = 1000,
+        Tmax_train: Optional[int] = None,
         # modules
         t_embedder = SinusoidalPositionEmbedding,
         t_embedder_kwargs = {},
@@ -28,6 +30,8 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
         self.out_target_field = self.out_field + "_target"
         self.ref_data_keys = [self.out_target_field] # used to register field for ref_data in geqtrain.trainer.batch_step
         self.T = Tmax
+        if Tmax_train is None: Tmax_train = self.T
+        self.T_train = Tmax_train
         self.t_embedder = t_embedder(**t_embedder_kwargs)
         self.noise_scheduler = noise_scheduler(T=self.T, **noise_scheduler_kwargs)
         
@@ -57,10 +61,10 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
         device = x.device
 
         # sample noise
-        eps = center_pos(torch.randn(size=x.shape, device=device)) # CENTER?
+        eps = center_pos(torch.randn(size=x.shape, device=device))
 
         # sample t, get alpha(t) and sigma(t)
-        t = torch.randint(0, self.T, size=(num_batches, 1), device=device)
+        t = torch.randint(0, self.T_train, size=(num_batches, 1), device=device)
         alpha, sigma = self.noise_scheduler(t)
 
         # compute noised coords and set target, both must be float32
