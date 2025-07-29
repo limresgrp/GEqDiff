@@ -168,6 +168,7 @@ def main():
     parser = argparse.ArgumentParser(description="GeqDiff Sampling Script")
     parser.add_argument("-m", "--model", type=str, required=True, help="Path to deployed model or .pth model weights.")
     parser.add_argument("-i", "--input_structure", type=str, required=True, help="Path to an input structure file (PDB, GRO, etc.).")
+    parser.add_argument("-o", "--output", type=str, default=None, help="Base path for the output file(s). Suffixes will be added automatically.")
     parser.add_argument("--selection", type=str, default="all", help="MDAnalysis selection string (e.g., 'not name H*').")
     parser.add_argument("--mol_index", type=int, default=0, help="Index of the molecule to use in a multi-molecule file (e.g., SDF). Default is 0.")
     parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
@@ -227,10 +228,20 @@ def main():
 
     # --- 4. Save Results ---
     
-    output_dir = Path("sampling_results")
-    output_dir.mkdir(exist_ok=True)
-    
-    output_file = output_dir / f"generated_molecule_{args.sampler}_{args.schedule_type}.xyz"
+    if args.output:
+        # User provided a path. Use it as the base.
+        output_base = Path(args.output)
+        # Create parent directory if it doesn't exist
+        output_base.parent.mkdir(parents=True, exist_ok=True)
+        output_file = output_base.with_suffix('.xyz')
+        traj_base_file = output_base
+    else:
+        # Default behavior: save in sampling_results with auto-generated name
+        output_dir = Path("sampling_results")
+        output_dir.mkdir(exist_ok=True)
+        file_name_stem = f"generated_molecule_{args.sampler}_{args.schedule_type}"
+        output_file = output_dir / f"{file_name_stem}.xyz"
+        traj_base_file = output_dir / f"trajectory_{args.sampler}_{args.schedule_type}"
     
     with open(output_file, "w") as f:
         f.write(f"{num_atoms}\n")
@@ -241,7 +252,7 @@ def main():
     print(f"Successfully saved generated coordinates to: {output_file}")
 
     if args.save_trajectory:
-        traj_file = output_dir / f"trajectory_{args.sampler}_{args.schedule_type}.{args.traj_format}"
+        traj_file = traj_base_file.with_suffix(f".{args.traj_format}")
         if args.traj_format == "npz":
             np.savez_compressed(traj_file, trajectory=np.array(trajectory))
             print(f"Successfully saved trajectory to: {traj_file}")
