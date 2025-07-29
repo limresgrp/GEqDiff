@@ -1,4 +1,4 @@
-# geqtrain package version file
+# geqdiff package version file
 # See Python packaging guide
 # https://packaging.python.org/guides/single-sourcing-package-version/
 

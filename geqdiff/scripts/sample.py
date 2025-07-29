@@ -6,22 +6,34 @@ import argparse
 
 try:
     import MDAnalysis as mda
+    from geqdiff.utils.SDFReader import SDFReader
 except ImportError:
     mda = None
 
+from geqdiff.utils.SDFReader import SDFParser
 from geqtrain.scripts.evaluate import load_model
 from geqdiff.data import AtomicDataDict
 from geqdiff.utils import NoiseScheduler, Sampler, DDPMSampler, DDIMSampler, center_pos
 
-# --- Helper functions (Unchanged) ---
+# --- Helper functions ---
 
-def load_structure(filepath: str, selection: str = "all"):
+def load_structure(filepath: str, selection: str = "all", mol_index: int = 0):
     """Loads a structure using MDAnalysis, applies a selection, and extracts data."""
     if mda is None:
         raise ImportError("MDAnalysis is required to read structure files. Please install it: `pip install MDAnalysis`")
     
     try:
-        universe = mda.Universe(filepath)
+        if filepath.lower().endswith(".sdf"):
+            print(f"Using SDFReader for {filepath}")
+            # Pass the custom class to the 'format' argument.
+            # Pass 'mol_index' as a keyword argument to our reader.
+            universe = mda.Universe(filepath, format=SDFReader, topology_format=SDFParser, mol_index=mol_index)
+        else:
+            # Standard MDAnalysis loading for all other formats
+            universe = mda.Universe(filepath)
+            if len(universe.trajectory) > 1:
+                print(f"Warning: Input file {filepath} has multiple frames. Using the frame {mol_index}.")
+                universe.trajectory[mol_index]
     except Exception as e:
         raise IOError(f"Could not read structure file {filepath}: {e}")
 
@@ -70,7 +82,7 @@ def save_trajectory_with_mda(output_path: str, atom_group: mda.core.groups.AtomG
 @torch.no_grad()
 def sample_from_model(
     model: torch.nn.Module,
-    sampler: Sampler, # Takes a Sampler object now
+    sampler: Sampler,
     device: str,
     r_max: float,
     num_atoms: int,
@@ -122,9 +134,8 @@ def sample_from_model(
 
     # 3. The main reverse diffusion loop
 
+    edge_index = build_edge_index(x_t, r_max)
     for i, t in enumerate(tqdm(time_steps, desc="Reverse Diffusion")):
-        edge_index = build_edge_index(x_t, r_max)
-
         data = {
             AtomicDataDict.POSITIONS_KEY: x_t,
             AtomicDataDict.NODE_TYPE_KEY: node_types.to(device),
@@ -158,6 +169,7 @@ def main():
     parser.add_argument("-m", "--model", type=str, required=True, help="Path to deployed model or .pth model weights.")
     parser.add_argument("-i", "--input_structure", type=str, required=True, help="Path to an input structure file (PDB, GRO, etc.).")
     parser.add_argument("--selection", type=str, default="all", help="MDAnalysis selection string (e.g., 'not name H*').")
+    parser.add_argument("--mol_index", type=int, default=0, help="Index of the molecule to use in a multi-molecule file (e.g., SDF). Default is 0.")
     parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
     # Updated arguments for sampler and schedule
@@ -173,7 +185,11 @@ def main():
     # --- 1. Load Model and Initial Structure ---
     
     model, config = load_model(args.model, device=args.device)
-    initial_pos, node_types, elements, atom_group = load_structure(args.input_structure, selection=args.selection)
+    initial_pos, node_types, elements, atom_group = load_structure(
+        args.input_structure, 
+        selection=args.selection, 
+        mol_index=args.mol_index
+    )
     num_atoms = len(initial_pos)
     
     try:
