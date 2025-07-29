@@ -17,7 +17,7 @@ def cosine_schedule(Tmax, s=0.008, raise_to_power: float = 1.0):
     alphas_cumprod = torch.cos(((t / Tmax) + s) / (1 + s) * torch.pi * 0.5) ** 2
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    betas = torch.clip(betas, 0.0001, 0.9999)
+    betas = torch.clip(betas, 0.0001, 0.99)
     alphas = 1.0 - betas
     
     # Recalculate alpha_bars from the clipped betas
