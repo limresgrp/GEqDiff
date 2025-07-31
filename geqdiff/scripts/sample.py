@@ -134,8 +134,8 @@ def sample_from_model(
 
     # 3. The main reverse diffusion loop
 
-    edge_index = build_edge_index(x_t, r_max)
     for i, t in enumerate(tqdm(time_steps, desc="Reverse Diffusion")):
+        edge_index = build_edge_index(x_t, r_max)
         data = {
             AtomicDataDict.POSITIONS_KEY: x_t,
             AtomicDataDict.NODE_TYPE_KEY: node_types.to(device),
@@ -180,7 +180,7 @@ def main():
     parser.add_argument("-f", "--field", type=str, default="noise", help="Out field where model saves predicted noise.")
     parser.add_argument("--ddim_steps", type=int, default=50, help="Number of steps for DDIM sampling.")
     parser.add_argument("--save_trajectory", action="store_true", help="Save the full trajectory.")
-    parser.add_argument("--traj_format", type=str, default="npz", choices=["npz", "xtc", "dcd"], help="Format for the saved trajectory.")
+    parser.add_argument("--traj_format", type=str, default="dcd", choices=["npz", "xtc", "dcd"], help="Format for the saved trajectory. Default: dcd")
     args = parser.parse_args()
 
     # --- 1. Load Model and Initial Structure ---
