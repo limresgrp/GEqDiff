@@ -55,13 +55,13 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
         return self._forward(data)
 
     def _forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        x = data[AtomicDataDict.POSITIONS_KEY]
+        x = center_pos(data[AtomicDataDict.POSITIONS_KEY])
         batch = data[AtomicDataDict.BATCH_KEY]
         num_batches = len(torch.unique(batch))
         device = x.device
 
         # sample noise
-        eps = center_pos(torch.randn(size=x.shape, device=device))
+        eps = center_pos(torch.randn(size=x.shape, device=device)) # CENTER?
 
         # sample t, get alpha(t) and sigma(t)
         t = torch.randint(0, self.T_train, size=(num_batches, 1), device=device)
