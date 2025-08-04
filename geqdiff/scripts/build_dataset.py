@@ -69,7 +69,7 @@ def build_dataset(args_dict):
     input = args_dict.get("input")
     if os.path.isdir(input):
         input_format = args_dict.get("inputformat", "*")
-        input_filenames = list(glob.glob(os.path.join(input, f"*.{input_format}")))
+        input_filenames = list(glob.glob(os.path.join(input, f"**/*.{input_format}"), recursive=True))
     else:
         input_filenames = [input]
     
