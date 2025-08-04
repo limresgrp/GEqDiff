@@ -9,6 +9,12 @@ from geqtrain.nn import GraphModuleMixin
 from geqdiff.nn.t_embedders import SinusoidalPositionEmbedding
 from geqdiff.utils.noise_schedulers import NoiseScheduler
 
+# Try to import scipy, which is required for AOT
+try:
+    from scipy.optimize import linear_sum_assignment
+except ImportError:
+    linear_sum_assignment = None
+
 
 @compile_mode("script")
 class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
@@ -23,6 +29,7 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
         noise_scheduler = NoiseScheduler,
         noise_scheduler_kwargs = {},
         # other
+        use_aot: bool = False,
         irreps_in=None,
     ):
         super().__init__()
@@ -32,6 +39,11 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
         self.T = Tmax
         if Tmax_train is None: Tmax_train = self.T
         self.T_train = Tmax_train
+
+        self.use_aot = use_aot
+        if self.use_aot and linear_sum_assignment is None:
+            raise ImportError("scipy is required to use AOT. Please install it: `pip install scipy`")
+
         self.t_embedder = t_embedder(**t_embedder_kwargs)
         self.noise_scheduler = noise_scheduler(T=self.T, **noise_scheduler_kwargs)
         
@@ -60,16 +72,64 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
         num_batches = len(torch.unique(batch))
         device = x.device
 
-        # sample noise
-        eps = center_pos(torch.randn(size=x.shape, device=device)) # CENTER?
+        eps_optimal = None
+
+        if self.use_aot:
+            # --- AOT with Padding & Masking ---
+            
+            # 1. Get molecule sizes and find the max size for padding
+            _, atom_counts = torch.unique(batch, return_counts=True)
+            N_max = int(atom_counts.max())
+            
+            # 2. Create padded tensors for coordinates and a mask
+            x_padded = torch.zeros(num_batches, N_max, 3, device=device)
+            attention_mask = torch.zeros(num_batches, N_max, device=device, dtype=torch.bool)
+            
+            for i in range(num_batches):
+                atom_indices = (batch == i)
+                num_atoms = atom_indices.sum()
+                x_padded[i, :num_atoms] = x[atom_indices]
+                attention_mask[i, :num_atoms] = True
+            
+            # 3. Sample a batch of noise, padded to the max size
+            eps_padded = torch.randn(num_batches, N_max, 3, device=device)
+
+            # 4. Calculate the masked and normalized BxB cost matrix
+            with torch.no_grad():
+                # Vectorized distance calculation
+                x_expanded = x_padded.unsqueeze(1)  # Shape: (B, 1, N_max, 3)
+                eps_expanded = eps_padded.unsqueeze(0) # Shape: (1, B, N_max, 3)
+                
+                diff_sq = (x_expanded - eps_expanded)**2 # Shape: (B, B, N_max, 3)
+                
+                # Apply mask to ignore distances for padded atoms
+                mask_expanded = attention_mask.unsqueeze(1).unsqueeze(-1) # Shape: (B, 1, N_max, 1)
+                masked_diff_sq = diff_sq * mask_expanded
+                
+                # Sum costs and normalize by the actual number of atoms for a fair comparison
+                sum_masked_diff_sq = masked_diff_sq.sum(dim=(-1, -2)) # Shape: (B, B)
+                counts_expanded = atom_counts.unsqueeze(1) # Shape: (B, 1)
+                
+                cost_matrix = torch.sqrt(sum_masked_diff_sq) / counts_expanded
+
+                # 5. Solve the assignment problem
+                _, col_ind = linear_sum_assignment(cost_matrix.cpu().numpy())
+            
+            # 6. Select the optimal noise and "un-pad" it back to a flat tensor
+            eps_optimal_padded = eps_padded[col_ind]
+            # Use the boolean mask to select only the real (non-padded) atom noise vectors
+            eps_optimal = eps_optimal_padded[attention_mask]
+        else:
+            # If not using AOT, the target is just standard random noise
+            eps_optimal = center_pos(torch.randn(size=x.shape, device=device))
 
         # sample t, get alpha(t) and sigma(t)
         t = torch.randint(0, self.T_train, size=(num_batches, 1), device=device)
         alpha, sigma = self.noise_scheduler(t)
 
         # compute noised coords and set target, both must be float32
-        data[AtomicDataDict.POSITIONS_KEY] = alpha[batch] * x  + sigma[batch] * eps
-        data[self.out_target_field] = eps
+        data[AtomicDataDict.POSITIONS_KEY] = alpha[batch] * x  + sigma[batch] * eps_optimal
+        data[self.out_target_field] = eps_optimal
 
         # add t-embedding to data obj
         data[AtomicDataDict.CONDITIONING_KEY] = self.t_embedder(t)[batch]
