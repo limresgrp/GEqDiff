@@ -15,7 +15,7 @@ except ImportError:
 from geqdiff.utils.SDFReader import SDFParser
 from geqtrain.scripts.evaluate import load_model
 from geqdiff.data import AtomicDataDict
-from geqdiff.utils import NoiseScheduler, Sampler, DDPMSampler, DDIMSampler, center_pos
+from geqdiff.utils import NoiseScheduler, Sampler, DDPMSampler, DDIMSampler, RectifiedFlowSampler, center_pos
 
 # --- Helper functions ---
 
@@ -91,7 +91,7 @@ def sample_from_model(
     node_types: torch.Tensor,
     initial_pos: torch.Tensor = None,
     t_init: int = None,
-    ddim_steps: int = 50,
+    steps: int = None,
     ddim_eta: float = 0.0,
     save_trajectory: bool = False,
     field: str = 'noise',
@@ -127,9 +127,12 @@ def sample_from_model(
     trajectory = [x_t.cpu().numpy()] if save_trajectory else []
 
     # 2. Define the timestep sequence for the reverse process
-    if isinstance(sampler, DDIMSampler):
-        time_steps = np.linspace(0, start_step, ddim_steps, dtype=int)[::-1].copy()
-        print(f"Using DDIM with {len(time_steps)} steps from t={start_step}.")
+    if isinstance(sampler, (DDIMSampler, RectifiedFlowSampler)):
+        if steps is None:
+            if isinstance(sampler, DDIMSampler): steps = 50
+            elif isinstance(sampler, RectifiedFlowSampler): steps = 20
+        time_steps = np.linspace(0, start_step, steps, dtype=int)[::-1].copy()
+        print(f"Using {sampler.__class__.__name__} with {len(time_steps)} steps from t={start_step}.")
     else: # DDPMSampler
         time_steps = np.arange(start_step + 1)[::-1].copy()
         print(f"Using DDPM with {len(time_steps)} steps from t={start_step}.")
@@ -149,12 +152,15 @@ def sample_from_model(
         out_dict = model(data)
         eps_pred = out_dict[field]
 
-        # Call the sampler's step method
-        if isinstance(sampler, DDIMSampler):
-            t_prev = time_steps[i + 1] if i < len(time_steps) - 1 else -1 # t_prev=-1 indicates the end
-            x_t = sampler.step(x_t, t, t_prev, eps_pred, eta=ddim_eta)
-        else: # DDPMSampler
+        # Call the sampler's step method based on its type
+        if isinstance(sampler, DDPMSampler):
             x_t = sampler.step(x_t, t, eps_pred)
+        else: # Handles both DDIM and RectifiedFlow
+            t_prev = time_steps[i + 1] if i < len(time_steps) - 1 else -1
+            if isinstance(sampler, DDIMSampler):
+                x_t = sampler.step(x_t, t, t_prev, eps_pred, eta=ddim_eta)
+            else: # RectifiedFlowSampler
+                x_t = sampler.step(x_t, t, t_prev, eps_pred)
             
         x_t = center_pos(x_t)
 
@@ -185,28 +191,30 @@ def main(args):
 
     # --- 2. Initialize Scheduler and Sampler ---
     
-    # First, create the noise schedule
     scheduler = NoiseScheduler(T=args.Tmax, schedule_type=args.schedule_type)
     
-    # Then, create the sampler and pass the scheduler to it
+    # Instantiate the chosen sampler
     if args.sampler == "ddpm":
         sampler = DDPMSampler(scheduler)
     elif args.sampler == "ddim":
         sampler = DDIMSampler(scheduler)
+    elif args.sampler == "rectified":
+        sampler = RectifiedFlowSampler(scheduler)
     else:
         raise ValueError(f"Unknown sampler: {args.sampler}")
 
     # --- 3. Run Sampling ---
     final_positions, trajectory = sample_from_model(
         model=model,
-        sampler=sampler, # Pass the sampler object
+        sampler=sampler,
         device=args.device,
         r_max=r_max,
         num_atoms=num_atoms,
         node_types=node_types,
         initial_pos=initial_pos,
         t_init=args.t_init,
-        ddim_steps=args.ddim_steps,
+        steps=args.steps,
+        ddim_eta=args.ddim_eta, # DDIM-specific, ignored by other samplers
         save_trajectory=args.save_trajectory,
         field=args.field,
     )
@@ -253,12 +261,12 @@ def parse_args(arg_list=None):
     parser.add_argument("--mol_index", type=int, default=0, help="Index of the molecule to use in a multi-molecule file (e.g., SDF). Default is 0.")
     parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
-    # Updated arguments for sampler and schedule
-    parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim"], help="Sampler to use.")
+    parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim", "rectified"], help="Sampler to use.")
     parser.add_argument("--schedule_type", type=str, default="linear", choices=["linear", "cosine"], help="Noise schedule to use.")
     parser.add_argument("-T", "--Tmax", type=int, default=1000, help="Maximum number of diffusion timesteps.")
     parser.add_argument("-f", "--field", type=str, default="noise", help="Out field where model saves predicted noise.")
-    parser.add_argument("--ddim_steps", type=int, default=50, help="Number of steps for DDIM sampling.")
+    parser.add_argument("--steps", type=int, default=None, help="Number of steps for DDIM or RectifiedFlow sampling.")
+    parser.add_argument("--ddim_eta", type=float, default=0.0, help="Eta parameter for DDIM sampling (controls stochasticity).")
     parser.add_argument("--save_trajectory", action="store_true", help="Save the full trajectory.")
     parser.add_argument("--traj_format", type=str, default="dcd", choices=["npz", "xtc", "dcd"], help="Format for the saved trajectory. Default: dcd")
     

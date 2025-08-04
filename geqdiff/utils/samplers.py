@@ -61,3 +61,39 @@ class DDIMSampler(Sampler):
 
         x_t_minus_1 = torch.sqrt(alpha_bar_t_prev) * x0_pred + dir_xt + sigma_t * z
         return x_t_minus_1
+
+class RectifiedFlowSampler(Sampler):
+    """
+    Implements a simplified Optimal Transport-based sampler using a numerically
+    stable formulation of the deterministic DDIM step (eta=0).
+    
+    This version is more robust for coordinate data as it avoids potential
+    scaling issues from an intermediate x0_pred calculation.
+    """
+    @torch.no_grad()
+    def step(self, x_t: torch.Tensor, t: int, t_prev: int, eps_pred: torch.Tensor):
+        s = self.scheduler
+        
+        # Get the alpha_bar values for the current and previous timesteps
+        alpha_bar_t = s.alpha_bar[t]
+        alpha_bar_t_prev = s.alpha_bar[t_prev] if t_prev >= 0 else torch.tensor(1.0)
+        
+        # --- Stable Formulation ---
+        # This is an equivalent but more numerically stable way to write the
+        # deterministic DDIM/Rectified Flow step.
+
+        # 1. Calculate the coefficient for the current state x_t
+        pred_original_sample_coeff = torch.sqrt(alpha_bar_t_prev) / torch.sqrt(alpha_bar_t)
+        
+        # 2. Calculate the coefficient for the noise prediction
+        pred_eps_coeff = torch.sqrt(alpha_bar_t_prev) * torch.sqrt(1 - alpha_bar_t) / torch.sqrt(alpha_bar_t)
+        
+        # 3. Compute x_{t-1} by combining x_t and a term pointing away from noise.
+        # This avoids creating x0_pred explicitly in the final combination.
+        x_t_minus_1 = pred_original_sample_coeff * x_t - pred_eps_coeff * eps_pred
+        
+        # An additional term is needed to complete the step, pointing toward the noise.
+        # This ensures the variance schedule is followed correctly.
+        x_t_minus_1 += torch.sqrt(1 - alpha_bar_t_prev) * eps_pred
+        
+        return x_t_minus_1
