@@ -1,3 +1,5 @@
+# geqdiff-sample -i /scratch/angiod/qm9/gdb9.sdf --mol_index 0 -d cuda:1 --schedule_type cosine -T 100 --save_trajectory -m /scratch/angiod/GEqDiff/results/foundation/RUN.28.07.25/best_model.pth
+
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -112,7 +114,7 @@ def sample_from_model(
         print(f"Starting from provided structure, noising to t={t_init}...")
         
         x_0 = initial_pos.to(device)
-        noise = torch.randn_like(x_0)
+        noise = center_pos(torch.randn_like(x_0))
         # Use the sampler's scheduler for the forward process
         alpha_t, sigma_t = sampler.scheduler(torch.tensor([t_init], device=device))
         x_t = center_pos(alpha_t * x_0 + sigma_t * noise)
@@ -164,24 +166,7 @@ def sample_from_model(
 
 # --- Script Entry Point (Updated) ---
 
-def main():
-    parser = argparse.ArgumentParser(description="GeqDiff Sampling Script")
-    parser.add_argument("-m", "--model", type=str, required=True, help="Path to deployed model or .pth model weights.")
-    parser.add_argument("-i", "--input_structure", type=str, required=True, help="Path to an input structure file (PDB, GRO, etc.).")
-    parser.add_argument("-o", "--output", type=str, default=None, help="Base path for the output file(s). Suffixes will be added automatically.")
-    parser.add_argument("--selection", type=str, default="all", help="MDAnalysis selection string (e.g., 'not name H*').")
-    parser.add_argument("--mol_index", type=int, default=0, help="Index of the molecule to use in a multi-molecule file (e.g., SDF). Default is 0.")
-    parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
-    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
-    # Updated arguments for sampler and schedule
-    parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim"], help="Sampler to use.")
-    parser.add_argument("--schedule_type", type=str, default="linear", choices=["linear", "cosine"], help="Noise schedule to use.")
-    parser.add_argument("-T", "--Tmax", type=int, default=1000, help="Maximum number of diffusion timesteps.")
-    parser.add_argument("-f", "--field", type=str, default="noise", help="Out field where model saves predicted noise.")
-    parser.add_argument("--ddim_steps", type=int, default=50, help="Number of steps for DDIM sampling.")
-    parser.add_argument("--save_trajectory", action="store_true", help="Save the full trajectory.")
-    parser.add_argument("--traj_format", type=str, default="dcd", choices=["npz", "xtc", "dcd"], help="Format for the saved trajectory. Default: dcd")
-    args = parser.parse_args()
+def main(args):
 
     # --- 1. Load Model and Initial Structure ---
     
@@ -259,5 +244,29 @@ def main():
         else:
             save_trajectory_with_mda(str(traj_file), atom_group, trajectory)
 
+def parse_args(arg_list=None):
+    parser = argparse.ArgumentParser(description="GeqDiff Sampling Script")
+    parser.add_argument("-m", "--model", type=str, required=True, help="Path to deployed model or .pth model weights.")
+    parser.add_argument("-i", "--input_structure", type=str, required=True, help="Path to an input structure file (PDB, GRO, etc.).")
+    parser.add_argument("-o", "--output", type=str, default=None, help="Base path for the output file(s). Suffixes will be added automatically.")
+    parser.add_argument("--selection", type=str, default="all", help="MDAnalysis selection string (e.g., 'not name H*').")
+    parser.add_argument("--mol_index", type=int, default=0, help="Index of the molecule to use in a multi-molecule file (e.g., SDF). Default is 0.")
+    parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
+    # Updated arguments for sampler and schedule
+    parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim"], help="Sampler to use.")
+    parser.add_argument("--schedule_type", type=str, default="linear", choices=["linear", "cosine"], help="Noise schedule to use.")
+    parser.add_argument("-T", "--Tmax", type=int, default=1000, help="Maximum number of diffusion timesteps.")
+    parser.add_argument("-f", "--field", type=str, default="noise", help="Out field where model saves predicted noise.")
+    parser.add_argument("--ddim_steps", type=int, default=50, help="Number of steps for DDIM sampling.")
+    parser.add_argument("--save_trajectory", action="store_true", help="Save the full trajectory.")
+    parser.add_argument("--traj_format", type=str, default="dcd", choices=["npz", "xtc", "dcd"], help="Format for the saved trajectory. Default: dcd")
+    
+    if arg_list is not None:
+        return parser.parse_args(arg_list)
+    else:
+        return parser.parse_args()
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(args)
