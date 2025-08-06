@@ -176,7 +176,13 @@ def run_dataset_processing(args_dict):
             # Add the array itself (np.savez will save its .data attribute)
             save_dict[key] = masked_array 
             # Add the mask as a separate array with the '__mask' suffix
-            save_dict[f"{key}__mask__"] = masked_array.mask
+            mask = masked_array.mask
+            # If mask has more than 2 dimensions, select the 0th element on all dims >2
+            if mask.ndim > 2:
+                # Keep first two dimensions, select 0th element for all others
+                slices = [slice(None), slice(None)] + [0] * (mask.ndim - 2)
+                mask = mask[tuple(slices)]
+            save_dict[f"{key}__mask__"] = mask
 
         # Get the output path and create the directory if it doesn't exist
         output_path = args_dict.get("output")
