@@ -172,7 +172,8 @@ def sample_from_model(
 
 # --- Script Entry Point (Updated) ---
 
-def main(args):
+def main():
+    args = parse_args()
 
     # --- 1. Load Model and Initial Structure ---
     
@@ -276,5 +277,4 @@ def parse_args(arg_list=None):
         return parser.parse_args()
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main()
