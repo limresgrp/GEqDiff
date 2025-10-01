@@ -75,7 +75,7 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
         eps_optimal = None
 
         if self.use_aot:
-            # --- AOT with Padding & Masking ---
+            # --- Approximated Optimal Transport (AOT) with Padding & Masking ---
             
             # 1. Get molecule sizes and find the max size for padding
             _, atom_counts = torch.unique(batch, return_counts=True)
@@ -118,7 +118,7 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
             # 6. Select the optimal noise and "un-pad" it back to a flat tensor
             eps_optimal_padded = eps_padded[col_ind]
             # Use the boolean mask to select only the real (non-padded) atom noise vectors
-            eps_optimal = eps_optimal_padded[attention_mask]
+            eps_optimal = center_pos(eps_optimal_padded[attention_mask])
         else:
             # If not using AOT, the target is just standard random noise
             eps_optimal = center_pos(torch.randn(size=x.shape, device=device))

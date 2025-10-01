@@ -13,9 +13,9 @@ except ImportError:
     mda = None
 
 from geqdiff.utils.SDFReader import SDFParser
-from geqtrain.scripts.evaluate import load_model
 from geqdiff.data import AtomicDataDict
 from geqdiff.utils import NoiseScheduler, Sampler, DDPMSampler, DDIMSampler, RectifiedFlowSampler, center_pos
+from geqtrain.train.components.checkpointing import CheckpointHandler
 
 # --- Helper functions ---
 
@@ -172,12 +172,13 @@ def sample_from_model(
 
 # --- Script Entry Point (Updated) ---
 
-def main():
-    args = parse_args()
+def main(args=None):
+    if args is None:
+        args = parse_args()
 
     # --- 1. Load Model and Initial Structure ---
     
-    model, config = load_model(args.model, device=args.device)
+    model, config, _ = CheckpointHandler.load_model(args.model, device=args.device)
     initial_pos, node_types, elements, atom_group = load_structure(
         args.input_structure, 
         selection=args.selection, 
