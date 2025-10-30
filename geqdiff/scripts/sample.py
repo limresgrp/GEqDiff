@@ -140,32 +140,42 @@ def sample_from_model(
     # 3. The main reverse diffusion loop
 
     for i, t in enumerate(tqdm(time_steps, desc="Reverse Diffusion")):
-        edge_index = build_edge_index(x_t, r_max)
-        data = {
-            AtomicDataDict.POSITIONS_KEY: x_t,
-            AtomicDataDict.NODE_TYPE_KEY: node_types.to(device),
-            AtomicDataDict.BATCH_KEY: torch.zeros(num_atoms, dtype=torch.long, device=device),
-            AtomicDataDict.EDGE_INDEX_KEY: edge_index,
-            AtomicDataDict.T_SAMPLED_KEY: torch.tensor([t], device=device)
-        }
+        try:
+            # Pre-step check for numerical stability
+            if not torch.isfinite(x_t).all():
+                print(f"\nWarning: Non-finite coordinates detected at step t={t}. Stopping generation.")
+                break
 
-        out_dict = model(data)
-        eps_pred = out_dict[field]
+            edge_index = build_edge_index(x_t, r_max)
+            data = {
+                AtomicDataDict.POSITIONS_KEY: x_t,
+                AtomicDataDict.NODE_TYPE_KEY: node_types.to(device),
+                AtomicDataDict.BATCH_KEY: torch.zeros(num_atoms, dtype=torch.long, device=device),
+                AtomicDataDict.EDGE_INDEX_KEY: edge_index,
+                AtomicDataDict.T_SAMPLED_KEY: torch.tensor([t], device=device)
+            }
 
-        # Call the sampler's step method based on its type
-        if isinstance(sampler, DDPMSampler):
-            x_t = sampler.step(x_t, t, eps_pred)
-        else: # Handles both DDIM and RectifiedFlow
-            t_prev = time_steps[i + 1] if i < len(time_steps) - 1 else -1
-            if isinstance(sampler, DDIMSampler):
-                x_t = sampler.step(x_t, t, t_prev, eps_pred, eta=ddim_eta)
-            else: # RectifiedFlowSampler
-                x_t = sampler.step(x_t, t, t_prev, eps_pred)
-            
-        x_t = center_pos(x_t)
+            out_dict = model(data)
+            eps_pred = out_dict[field]
 
-        if save_trajectory:
-            trajectory.append(x_t.cpu().numpy())
+            # Call the sampler's step method based on its type
+            if isinstance(sampler, DDPMSampler):
+                x_t = sampler.step(x_t, t, eps_pred)
+            else: # Handles both DDIM and RectifiedFlow
+                t_prev = time_steps[i + 1] if i < len(time_steps) - 1 else -1
+                if isinstance(sampler, DDIMSampler):
+                    x_t = sampler.step(x_t, t, t_prev, eps_pred, eta=ddim_eta)
+                else: # RectifiedFlowSampler
+                    x_t = sampler.step(x_t, t, t_prev, eps_pred)
+                
+            x_t = center_pos(x_t)
+
+            if save_trajectory:
+                trajectory.append(x_t.cpu().numpy())
+        except Exception as e:
+            print(f"\nAn error occurred during sampling at step t={t}: {e}")
+            print("Stopping generation and saving the partial trajectory.")
+            break
 
     print("Sampling complete.")
     return x_t.cpu().numpy(), trajectory
