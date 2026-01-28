@@ -19,7 +19,7 @@ from geqtrain.train.components.checkpointing import CheckpointHandler
 
 # --- Helper functions ---
 
-def load_structure(filepath: str, selection: str = "all", mol_index: int = 0):
+def load_structure(filepath: str, selection: str = "all", mol_index: int = 0, noh: bool = False):
     """Loads a structure using MDAnalysis, applies a selection, and extracts data."""
     if mda is None:
         raise ImportError("MDAnalysis is required to read structure files. Please install it: `pip install MDAnalysis`")
@@ -39,6 +39,8 @@ def load_structure(filepath: str, selection: str = "all", mol_index: int = 0):
     except Exception as e:
         raise IOError(f"Could not read structure file {filepath}: {e}")
 
+    if noh:
+        selection = f"({selection}) and not name H*"
     atom_group = universe.select_atoms(selection)
     if len(atom_group) == 0:
         raise ValueError(f"The selection '{selection}' resulted in 0 atoms. Please check your selection string.")
@@ -48,10 +50,13 @@ def load_structure(filepath: str, selection: str = "all", mol_index: int = 0):
     positions = torch.tensor(atom_group.positions, dtype=torch.float32)
     try:
         elements = [atom.element for atom in atom_group]
-    except:
+    except Exception:
         elements = [atom.type for atom in atom_group]
-    
-    element_map = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'S': 4, 'F': 5, 'Cl': 6, 'Br': 7, 'I': 8}
+
+    if noh:
+        element_map = {'C': 0, 'N': 1, 'O': 2, 'S': 3, 'F': 4, 'Cl': 5, 'Br': 6, 'I': 7}
+    else:
+        element_map = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'S': 4, 'F': 5, 'Cl': 6, 'Br': 7, 'I': 8}
     node_types = torch.tensor([element_map.get(el, -1) for el in elements], dtype=torch.long)
 
     if (node_types == -1).any():
@@ -111,6 +116,7 @@ def sample_from_model(
     steps: int = None,
     ddim_eta: float = 0.0,
     save_trajectory: bool = False,
+    save_npz: bool = False,
     field: str = 'noise',
 ):
     """
@@ -156,6 +162,15 @@ def sample_from_model(
     else:
         trajectory = []
 
+    npz_positions = []
+    npz_noise = []
+    npz_alpha_bar = []
+    npz_alphas = []
+    npz_betas = []
+    npz_sqrt_alpha_bar = []
+    npz_sqrt_one_minus_alpha_bar = []
+    npz_t_prev = []
+
     # 2. Define the timestep sequence for the reverse process
     if isinstance(sampler, (DDIMSampler, RectifiedFlowSampler)):
         if steps is None:
@@ -176,6 +191,8 @@ def sample_from_model(
                 print(f"\nWarning: Non-finite coordinates detected at step t={t}. Stopping generation.")
                 break
 
+            t_prev = time_steps[i + 1] if i < len(time_steps) - 1 else -1
+
             edge_index = build_edge_index_batched(x_t.reshape(batch_size, num_atoms, 3), r_max)
             data = {
                 AtomicDataDict.POSITIONS_KEY: x_t,
@@ -187,12 +204,20 @@ def sample_from_model(
 
             out_dict = model(data)
             eps_pred = out_dict[field]
+            if save_npz:
+                npz_positions.append(x_t.reshape(batch_size, num_atoms, 3).cpu().numpy())
+                npz_noise.append(eps_pred.reshape(batch_size, num_atoms, 3).cpu().numpy())
+                npz_alpha_bar.append(sampler.scheduler.alpha_bar[t].item())
+                npz_alphas.append(sampler.scheduler.alphas[t].item())
+                npz_betas.append(sampler.scheduler.betas[t].item())
+                npz_sqrt_alpha_bar.append(sampler.scheduler.sqrt_alpha_bar[t].item())
+                npz_sqrt_one_minus_alpha_bar.append(sampler.scheduler.sqrt_one_minus_alpha_bar[t].item())
+                npz_t_prev.append(t_prev)
 
             # Call the sampler's step method based on its type
             if isinstance(sampler, DDPMSampler):
                 x_t = sampler.step(x_t, t, eps_pred)
             else: # Handles both DDIM and RectifiedFlow
-                t_prev = time_steps[i + 1] if i < len(time_steps) - 1 else -1
                 if isinstance(sampler, DDIMSampler):
                     x_t = sampler.step(x_t, t, t_prev, eps_pred, eta=ddim_eta)
                 else: # RectifiedFlowSampler
@@ -211,7 +236,21 @@ def sample_from_model(
             break
 
     print("Sampling complete.")
-    return x_t.reshape(batch_size, num_atoms, 3).cpu().numpy(), trajectory
+    npz_data = None
+    if save_npz and npz_positions and npz_noise:
+        steps_saved = min(len(npz_positions), len(npz_noise))
+        npz_data = {
+            "positions": np.stack(npz_positions[:steps_saved], axis=1),
+            "noise": np.stack(npz_noise[:steps_saved], axis=1),
+            "time_steps": np.array(time_steps[:steps_saved], dtype=int),
+            "t_prev": np.array(npz_t_prev[:steps_saved], dtype=int),
+            "alpha_bar": np.array(npz_alpha_bar[:steps_saved], dtype=np.float32),
+            "alphas": np.array(npz_alphas[:steps_saved], dtype=np.float32),
+            "betas": np.array(npz_betas[:steps_saved], dtype=np.float32),
+            "sqrt_alpha_bar": np.array(npz_sqrt_alpha_bar[:steps_saved], dtype=np.float32),
+            "sqrt_one_minus_alpha_bar": np.array(npz_sqrt_one_minus_alpha_bar[:steps_saved], dtype=np.float32),
+        }
+    return x_t.reshape(batch_size, num_atoms, 3).cpu().numpy(), trajectory, npz_data
 
 # --- Script Entry Point (Updated) ---
 
@@ -225,7 +264,8 @@ def main(args=None):
     initial_pos, node_types, elements, atom_group = load_structure(
         args.input_structure, 
         selection=args.selection, 
-        mol_index=args.mol_index
+        mol_index=args.mol_index,
+        noh=args.noh,
     )
     num_atoms = len(initial_pos)
     
@@ -263,12 +303,15 @@ def main(args=None):
 
     final_batches = []
     diffusion_trajectory = None
+    npz_positions_batches = []
+    npz_noise_batches = []
+    npz_meta = None
     for start_idx in range(0, args.num_samples, batch_size):
         current_batch = min(batch_size, args.num_samples - start_idx)
         if args.num_samples > 1:
             print(f"Running batch {start_idx + 1}-{start_idx + current_batch} of {args.num_samples}...")
 
-        final_positions, trajectory = sample_from_model(
+        final_positions, trajectory, npz_data = sample_from_model(
             model=model,
             sampler=sampler,
             device=args.device,
@@ -281,11 +324,17 @@ def main(args=None):
             steps=args.steps,
             ddim_eta=args.ddim_eta, # DDIM-specific, ignored by other samplers
             save_trajectory=args.save_trajectory and args.num_samples == 1,
+            save_npz=args.save_npz,
             field=args.field,
         )
         final_batches.append(final_positions)
         if args.save_trajectory and args.num_samples == 1:
             diffusion_trajectory = trajectory
+        if args.save_npz and npz_data is not None:
+            npz_positions_batches.append(npz_data["positions"])
+            npz_noise_batches.append(npz_data["noise"])
+            if npz_meta is None:
+                npz_meta = {k: v for k, v in npz_data.items() if k not in ("positions", "noise")}
 
     final_positions = np.concatenate(final_batches, axis=0)
 
@@ -338,6 +387,29 @@ def main(args=None):
             else:
                 save_trajectory_with_mda(str(traj_file), atom_group, list(final_positions))
 
+    if args.save_npz and npz_positions_batches and npz_noise_batches:
+        full_positions = np.concatenate(npz_positions_batches, axis=0)
+        full_noise = np.concatenate(npz_noise_batches, axis=0)
+        if args.output:
+            npz_file = output_base.with_name(output_base.stem + "_full").with_suffix(".npz")
+        else:
+            npz_file = output_dir / f"full_{args.sampler}_{args.schedule_type}.npz"
+        npz_payload = {
+            "positions": full_positions,
+            "noise": full_noise,
+            "sampler": np.array(args.sampler),
+            "schedule_type": np.array(args.schedule_type),
+            "t_init": np.array(-1 if args.t_init is None else args.t_init),
+            "steps": np.array(-1 if args.steps is None else args.steps),
+            "ddim_eta": np.array(args.ddim_eta),
+            "field": np.array(args.field),
+            "r_max": np.array(float(r_max)),
+        }
+        if npz_meta is not None:
+            npz_payload.update(npz_meta)
+        np.savez_compressed(npz_file, **npz_payload)
+        print(f"Successfully saved full sampling data to: {npz_file}")
+
 def parse_args(arg_list=None):
     parser = argparse.ArgumentParser(description="GeqDiff Sampling Script")
     parser.add_argument("-m", "--model", type=str, required=True, help="Path to deployed model or .pth model weights.")
@@ -345,6 +417,7 @@ def parse_args(arg_list=None):
     parser.add_argument("-o", "--output", type=str, default=None, help="Base path for the output file(s). Suffixes will be added automatically.")
     parser.add_argument("--selection", type=str, default="all", help="MDAnalysis selection string (e.g., 'not name H*').")
     parser.add_argument("--mol_index", type=int, default=0, help="Index of the molecule to use in a multi-molecule file (e.g., SDF). Default is 0.")
+    parser.add_argument("--noh", action="store_true", help="Drop hydrogens and shift atom type mapping so C=0.")
     parser.add_argument("--num_samples", type=int, default=1, help="Number of samples to generate.")
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size for sampling. Defaults to --num_samples.")
     parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
@@ -356,6 +429,7 @@ def parse_args(arg_list=None):
     parser.add_argument("--steps", type=int, default=None, help="Number of steps for DDIM or RectifiedFlow sampling.")
     parser.add_argument("--ddim_eta", type=float, default=0.0, help="Eta parameter for DDIM sampling (controls stochasticity).")
     parser.add_argument("--save_trajectory", action="store_true", help="Save trajectory. For a single sample, saves the diffusion trajectory. For multiple samples, saves the final samples as a trajectory.")
+    parser.add_argument("--save_npz", action="store_true", help="Save per-step positions and predicted noise to an NPZ file.")
     parser.add_argument("--traj_format", type=str, default="dcd", choices=["npz", "xtc", "dcd"], help="Format for the saved trajectory. Default: dcd")
     
     if arg_list is not None:

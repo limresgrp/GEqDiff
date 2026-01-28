@@ -3,7 +3,7 @@
 Plot a Ramachandran density map (phi/psi) from a trajectory.
 
 Example:
-  python geqdiff/scripts/ramachandran.py --top ref.pdb --traj generated.xyz --reorder_to_top --out rama.png
+  python geqdiff/scripts/ramachandran.py --top ref.pdb --traj generated.xyz --rdkit_reorder --noh --out rama.png
 """
 
 import argparse
@@ -31,6 +31,13 @@ except ImportError as exc:
     raise ImportError(
         "matplotlib is required. Install it with `pip install matplotlib`."
     ) from exc
+
+try:
+    from rdkit import Chem
+    from rdkit.Chem import rdMolAlign
+except ImportError:
+    Chem = None
+    rdMolAlign = None
 
 try:
     from scipy.optimize import linear_sum_assignment
@@ -64,7 +71,10 @@ def _normalize_element(label: str) -> str:
 def _atom_elements(atoms) -> np.ndarray:
     elements = []
     for atom in atoms:
-        element = atom.element
+        try:
+            element = atom.element
+        except:
+            element = None
         if not element:
             if guess_atom_element is not None:
                 element = guess_atom_element(atom.name)
@@ -72,6 +82,35 @@ def _atom_elements(atoms) -> np.ndarray:
                 element = atom.name
         elements.append(_normalize_element(element))
     return np.array(elements, dtype=object)
+
+
+def _atom_numbers(atoms) -> np.ndarray:
+    if Chem is None:
+        raise ImportError("rdkit is required for --rdkit_reorder.")
+    numbers = []
+    pt = Chem.GetPeriodicTable()
+    for atom in atoms:
+        num = None
+        try:
+            num = atom.atomic_number
+        except Exception:
+            num = None
+        if not num:
+            try:
+                element = atom.element
+            except Exception:
+                element = None
+            if not element:
+                if guess_atom_element is not None:
+                    element = guess_atom_element(atom.name)
+                else:
+                    element = atom.name
+            element = _normalize_element(element)
+            num = pt.GetAtomicNumber(element)
+        if not num:
+            raise ValueError(f"Could not determine atomic number for atom '{atom.name}'.")
+        numbers.append(int(num))
+    return np.array(numbers, dtype=int)
 
 
 def _distance_fingerprints(positions: np.ndarray) -> np.ndarray:
@@ -137,44 +176,108 @@ def _compute_mapping(
     return mapping
 
 
-def _bond_indices(universe) -> Optional[np.ndarray]:
+def _rdkit_ref_mol(atoms, removeHs: bool, sanitize: bool = True) -> "Chem.Mol":
+    atomic_num = _atom_numbers(atoms)
+    coords = atoms.positions
+    return _rdkit_mol_from_xyz(
+        atomic_num,
+        coords,
+        removeHs=removeHs,
+        sanitize=sanitize,
+    )
+
+
+def _xyz_block(elements: np.ndarray, coords: np.ndarray) -> str:
+    lines = [str(len(elements)), "frame"]
+    for element, pos in zip(elements, coords):
+        lines.append(f"{element} {pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f}")
+    return "\n".join(lines) + "\n"
+
+def _rdkit_mol_from_xyz(
+    atomic_num: np.ndarray,
+    coords: np.ndarray,
+    removeHs: bool = True,
+    sanitize: bool = True,
+) -> Chem.Mol:
+    """
+    Convert coordinates and atomic numbers to an RDKit molecule.
+
+    Args:
+        coords: Tensor of shape (N, 3) containing 3D coordinates
+        atomic_num: Tensor of shape (N,) containing atomic numbers
+        removeHs: Whether to remove hydrogen atoms from the molecule
+
+    Returns:
+        RDKit molecule object
+    """
+    # Create empty molecule
+    mol = Chem.RWMol()
+
+    # Add atoms to molecule
+    for atomic_num_val in atomic_num:
+        atom = Chem.Atom(int(atomic_num_val))
+        mol.AddAtom(atom)
+
+    # Create conformer and set coordinates
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    for i in range(mol.GetNumAtoms()):
+        x, y, z = coords[i].tolist()
+        conf.SetAtomPosition(i, Chem.rdGeometry.Point3D(x, y, z))
+    mol.AddConformer(conf)
+
+    # Add bonds based on distance (simple heuristic)
+    for i in range(mol.GetNumAtoms()):
+        for j in range(i + 1, mol.GetNumAtoms()):
+            dist = np.linalg.norm(coords[i] - coords[j]).item()
+            # Simple distance-based bonding heuristic
+            if dist < 1.8:  # Typical single bond length
+                mol.AddBond(i, j, Chem.BondType.SINGLE)
+
+    # Convert to regular molecule and sanitize
+    mol = mol.GetMol()
+    if sanitize:
+        Chem.SanitizeMol(mol)
+
+    # Handle hydrogens
+    # Print initial number of atoms before hydrogen manipulation
+    # print(f"Initial number of atoms: {mol.GetNumAtoms()}")
+
+    if removeHs:
+        # Remove hydrogen atoms and print new count
+        mol = Chem.RemoveHs(mol)
+        # print(f"Number of atoms after removing hydrogens: {mol.GetNumAtoms()}")
+
+    # Print final number of atoms for verification
+    # print(f"Final number of atoms: {mol.GetNumAtoms()}")
+    return mol
+
+
+def _rdkit_atom_map(probe_mol: "Chem.Mol", ref_mol: "Chem.Mol") -> np.ndarray:
+    if rdMolAlign is None:
+        raise ImportError("rdkit is required for --rdkit_reorder.")
+    result = None
     try:
-        bonds = universe.bonds
-    except AttributeError:
-        return None
-    if bonds is None or len(bonds) == 0:
-        return None
-    return bonds.indices.astype(int, copy=False)
-
-
-def _bond_lengths(positions: np.ndarray, bond_indices: np.ndarray) -> np.ndarray:
-    if bond_indices is None or bond_indices.size == 0:
-        return np.array([], dtype=np.float32)
-    diff = positions[bond_indices[:, 0]] - positions[bond_indices[:, 1]]
-    return np.linalg.norm(diff, axis=1)
-
-
-def _passes_bond_checks(
-    lengths: np.ndarray,
-    ref_lengths: np.ndarray,
-    tolerance: float,
-    bond_min: Optional[float],
-    bond_max: Optional[float],
-) -> bool:
-    if lengths.size == 0:
-        return True
-    if np.any(~np.isfinite(lengths)):
-        return False
-    if bond_min is not None and np.any(lengths < bond_min):
-        return False
-    if bond_max is not None and np.any(lengths > bond_max):
-        return False
-    if tolerance is not None and tolerance >= 0:
-        lower = ref_lengths * (1.0 - tolerance)
-        upper = ref_lengths * (1.0 + tolerance)
-        if np.any(lengths < lower) or np.any(lengths > upper):
-            return False
-    return True
+        result = rdMolAlign.GetBestAlignmentTransform(
+            probe_mol, ref_mol, reflect=False, maxIters=1000
+        )
+    except TypeError:
+        result = rdMolAlign.GetBestAlignmentTransform(probe_mol, ref_mol)
+    atom_map = None
+    if isinstance(result, tuple) and len(result) == 3:
+        atom_map = result[2]
+    if atom_map is None:
+        get_best_rms = getattr(rdMolAlign, "GetBestRMS", None)
+        if get_best_rms is None:
+            raise ValueError("RDKit does not expose atom maps for alignment.")
+        try:
+            _, atom_map = get_best_rms(probe_mol, ref_mol, returnAtomMap=True)
+        except TypeError as exc:
+            raise ValueError("RDKit version does not return atom maps; please update RDKit.") from exc
+    atom_map_list = list(atom_map)
+    if not atom_map_list:
+        raise ValueError("RDKit alignment returned an empty atom map.")
+    atom_map_sorted = sorted(atom_map_list, key=lambda x: x[1])
+    return np.array([probe_idx for probe_idx, ref_idx in atom_map_sorted], dtype=int)
 
 
 def _write_xyz_frames(path: str, elements: np.ndarray, frames: list, comment: str) -> None:
@@ -191,15 +294,43 @@ def _write_xyz_frames(path: str, elements: np.ndarray, frames: list, comment: st
                 handle.write(f"{element}   {pos[0]:.4f}   {pos[1]:.4f}   {pos[2]:.4f}\n")
 
 
+def _make_universe(*args, guess_bonds: bool) -> "mda.Universe":
+    if guess_bonds:
+        to_guess = ("bonds", "angles", "dihedrals")
+        try:
+            return mda.Universe(*args, to_guess=to_guess)
+        except TypeError:
+            return mda.Universe(*args, guess_bonds=True)
+    try:
+        return mda.Universe(*args)
+    except TypeError:
+        return mda.Universe(*args, guess_bonds=False)
+
+
+def _filter_phi_psi_residues(atomgroup):
+    residues = atomgroup.residues
+    if len(residues) == 0:
+        return residues
+    try:
+        prev = residues._get_prev_residues_by_resid()
+        nxt = residues._get_next_residues_by_resid()
+    except AttributeError:
+        return residues
+    keep = np.array([r is not None for r in prev]) & np.array([r is not None for r in nxt])
+    if not np.all(keep):
+        dropped = len(residues) - int(keep.sum())
+        print(f"Note: dropping {dropped} residues without phi/psi definitions.")
+        residues = residues[keep]
+    return residues
+
+
 def plot_ramachandran(
     top_path: str,
     traj_path: str,
     reorder_to_top: bool,
-    bond_check: bool,
-    bond_tolerance: float,
-    bond_min: Optional[float],
-    bond_max: Optional[float],
+    rdkit_reorder: bool,
     discarded_xyz: Optional[str],
+    noh: bool,
     selection: str,
     out_path: str,
     bins: int,
@@ -210,83 +341,70 @@ def plot_ramachandran(
     show: bool,
 ) -> None:
     if reorder_to_top:
-        reference = mda.Universe(top_path, guess_bonds=guess_bonds)
-        trajectory = mda.Universe(traj_path, guess_bonds=guess_bonds)
-        if len(reference.atoms) != len(trajectory.atoms):
+        reference = _make_universe(top_path, guess_bonds=guess_bonds)
+        trajectory = _make_universe(traj_path, guess_bonds=guess_bonds)
+        if noh:
+            ref_atoms = reference.select_atoms("not name H*")
+            traj_atoms = trajectory.select_atoms("not name H*")
+        else:
+            ref_atoms = reference.atoms
+            traj_atoms = trajectory.atoms
+        if len(ref_atoms) != len(traj_atoms):
             raise ValueError("Reference and trajectory must have the same atom count.")
-        ref_elements = _atom_elements(reference.atoms)
-        traj_elements = _atom_elements(trajectory.atoms)
-        bond_indices = _bond_indices(reference) if bond_check else None
-        if bond_check and bond_indices is None:
-            print("Warning: no bonds found in reference topology; skipping bond checks.")
-            bond_check = False
-        ref_lengths = _bond_lengths(reference.atoms.positions, bond_indices)
+        ref_elements = _atom_elements(ref_atoms)
+        traj_elements = _atom_elements(traj_atoms)
+        if rdkit_reorder:
+            traj_atomic_num = _atom_numbers(traj_atoms)
+            rdkit_ref = _rdkit_ref_mol(ref_atoms, noh)
+        else:
+            traj_atomic_num = None
+            rdkit_ref = None
 
         reordered = []
         discarded = 0
         discarded_frames = []
         for ts in trajectory.trajectory:
-            mapping = _compute_mapping(
-                reference.atoms.positions,
-                ref_elements,
-                trajectory.atoms.positions,
-                traj_elements,
-            )
-            coords = trajectory.atoms.positions[mapping].copy()
-            if bond_check:
-                lengths = _bond_lengths(coords, bond_indices)
-                if not _passes_bond_checks(lengths, ref_lengths, bond_tolerance, bond_min, bond_max):
+            if rdkit_reorder:
+                try:
+                    probe_mol = _rdkit_mol_from_xyz(
+                        traj_atomic_num,
+                        traj_atoms.positions,
+                        removeHs=noh,
+                    )
+                    mapping = _rdkit_atom_map(probe_mol, rdkit_ref)
+                except Exception as e:
                     discarded += 1
                     if discarded_xyz:
-                        discarded_frames.append(coords)
+                        discarded_frames.append(traj_atoms.positions.copy())
                     continue
+            else:
+                mapping = _compute_mapping(
+                    ref_atoms.positions,
+                    ref_elements,
+                    traj_atoms.positions,
+                    traj_elements,
+                )
+            coords = traj_atoms.positions[mapping].copy()
             reordered.append(coords)
-        if bond_check:
+        if rdkit_reorder:
             total = len(trajectory.trajectory)
-            print(f"Discarded {discarded}/{total} frames due to bond sanity checks.")
+            print(f"Discarded {discarded}/{total} frames due to RDKit alignment failures.")
             if discarded_xyz and discarded_frames:
                 _write_xyz_frames(
                     discarded_xyz,
-                    ref_elements,
+                    traj_elements,
                     discarded_frames,
                     "Discarded frame",
                 )
+        if not reordered:
+            raise ValueError("No frames left after RDKit alignment filtering.")
+        if noh:
+            reference = mda.Merge(ref_atoms)
         coords = np.asarray(reordered, dtype=np.float32)
         reference.load_new(coords, format=MemoryReader)
         universe = reference
     else:
-        universe = mda.Universe(top_path, traj_path, guess_bonds=guess_bonds)
-        if bond_check:
-            bond_indices = _bond_indices(universe)
-            if bond_indices is None:
-                print("Warning: no bonds found in topology; skipping bond checks.")
-                bond_check = False
-            else:
-                elements = _atom_elements(universe.atoms)
-                ref_lengths = _bond_lengths(universe.atoms.positions, bond_indices)
-                filtered = []
-                discarded = 0
-                discarded_frames = []
-                for ts in universe.trajectory:
-                    coords = universe.atoms.positions.copy()
-                    lengths = _bond_lengths(coords, bond_indices)
-                    if not _passes_bond_checks(lengths, ref_lengths, bond_tolerance, bond_min, bond_max):
-                        discarded += 1
-                        if discarded_xyz:
-                            discarded_frames.append(coords)
-                        continue
-                    filtered.append(coords)
-                total = len(universe.trajectory)
-                print(f"Discarded {discarded}/{total} frames due to bond sanity checks.")
-                if discarded_xyz and discarded_frames:
-                    _write_xyz_frames(
-                        discarded_xyz,
-                        elements,
-                        discarded_frames,
-                        "Discarded frame",
-                    )
-                universe = mda.Universe(top_path, guess_bonds=guess_bonds)
-                universe.load_new(np.asarray(filtered, dtype=np.float32), format=MemoryReader)
+        universe = _make_universe(top_path, traj_path, guess_bonds=guess_bonds)
     sel = universe.select_atoms(selection)
     if len(sel) == 0 and selection == "protein":
         print("Warning: selection 'protein' returned 0 atoms; falling back to 'all'.")
@@ -299,8 +417,11 @@ def plot_ramachandran(
             "(e.g., PDB/PSF with N/CA/C)."
         )
 
-    rama = Ramachandran(sel, check_protein=False).run(start=start, stop=stop, step=step)
-    angles = _flatten_angles(np.asarray(rama.angles))
+    residues = _filter_phi_psi_residues(sel)
+    if len(residues) == 0:
+        raise ValueError("Selection has no residues with phi/psi definitions.")
+    rama = Ramachandran(residues, check_protein=False).run(start=start, stop=stop, step=step)
+    angles = _flatten_angles(np.asarray(rama.results.angles))
 
     phi = angles[:, 0]
     psi = angles[:, 1]
@@ -338,27 +459,14 @@ def parse_args(argv=None):
     parser.add_argument("--top", required=True, help="Topology file (e.g., XYZ, PDB).")
     parser.add_argument("--traj", required=True, help="Trajectory file (e.g., multi-frame XYZ).")
     parser.add_argument(
-        "--bond_check",
+        "--rdkit_reorder",
         action="store_true",
-        help="Discard frames with broken bonds based on reference topology.",
+        help="Use RDKit alignment to reorder atoms; discards frames that fail alignment.",
     )
     parser.add_argument(
-        "--bond_tolerance",
-        type=float,
-        default=0.8,
-        help="Relative bond length tolerance vs reference (default: 0.8).",
-    )
-    parser.add_argument(
-        "--bond_min",
-        type=float,
-        default=None,
-        help="Absolute minimum bond length (Angstrom).",
-    )
-    parser.add_argument(
-        "--bond_max",
-        type=float,
-        default=None,
-        help="Absolute maximum bond length (Angstrom).",
+        "--noh",
+        action="store_true",
+        help="Drop hydrogens before reordering and analysis.",
     )
     parser.add_argument(
         "--discarded_xyz",
@@ -391,11 +499,9 @@ def main():
         top_path=args.top,
         traj_path=args.traj,
         reorder_to_top=True,
-        bond_check=args.bond_check,
-        bond_tolerance=args.bond_tolerance,
-        bond_min=args.bond_min,
-        bond_max=args.bond_max,
+        rdkit_reorder=args.rdkit_reorder,
         discarded_xyz=args.discarded_xyz,
+        noh=args.noh,
         selection=args.selection,
         out_path=args.out,
         bins=args.bins,
