@@ -57,6 +57,47 @@ def _flatten_angles(angles: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unexpected angles array shape: {angles.shape}")
 
 
+def _read_xyz_frames(path: str):
+    """Generator that yields element symbols and coordinates for each frame in an XYZ file."""
+    with open(path, "r") as f:
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            try:
+                num_atoms = int(line.strip())
+            except (ValueError, IndexError):
+                # End of file or invalid line
+                break
+            f.readline()  # Skip comment line
+            elements = []
+            coords = np.zeros((num_atoms, 3), dtype=np.float32)
+            for i in range(num_atoms):
+                line = f.readline()
+                if not line:
+                    raise IOError(f"Unexpected end of file in frame with {num_atoms} atoms.")
+                parts = line.split()
+                elements.append(parts[0])
+                coords[i] = [float(p) for p in parts[1:4]]
+            yield np.array(elements, dtype=object), coords
+
+
+def _atom_numbers_from_symbols(elements: np.ndarray) -> np.ndarray:
+    if Chem is None:
+        raise ImportError("rdkit is required for --rdkit_reorder.")
+    pt = Chem.GetPeriodicTable()
+    numbers = []
+    for element in elements:
+        element_str = _normalize_element(element)
+        try:
+            num = pt.GetAtomicNumber(element_str)
+        except Exception:
+            raise ValueError(f"Could not determine atomic number for atom '{element}'.")
+        numbers.append(int(num))
+    return np.array(numbers, dtype=int)
+
+
+
 def _normalize_element(label: str) -> str:
     label = (label or "").strip()
     if not label:
@@ -323,7 +364,6 @@ def _filter_phi_psi_residues(atomgroup):
         residues = residues[keep]
     return residues
 
-
 def plot_ramachandran(
     top_path: str,
     traj_path: str,
@@ -342,60 +382,71 @@ def plot_ramachandran(
 ) -> None:
     if reorder_to_top:
         reference = _make_universe(top_path, guess_bonds=guess_bonds)
-        trajectory = _make_universe(traj_path, guess_bonds=guess_bonds)
         if noh:
             ref_atoms = reference.select_atoms("not name H*")
-            traj_atoms = trajectory.select_atoms("not name H*")
         else:
             ref_atoms = reference.atoms
-            traj_atoms = trajectory.atoms
-        if len(ref_atoms) != len(traj_atoms):
-            raise ValueError("Reference and trajectory must have the same atom count.")
         ref_elements = _atom_elements(ref_atoms)
-        traj_elements = _atom_elements(traj_atoms)
         if rdkit_reorder:
-            traj_atomic_num = _atom_numbers(traj_atoms)
             rdkit_ref = _rdkit_ref_mol(ref_atoms, noh)
         else:
-            traj_atomic_num = None
             rdkit_ref = None
 
         reordered = []
         discarded = 0
         discarded_frames = []
-        for ts in trajectory.trajectory:
+        total_frames = 0
+        frame_generator = _read_xyz_frames(traj_path)
+
+        for traj_elements_frame, traj_coords_frame in frame_generator:
+            total_frames += 1
+            original_coords = traj_coords_frame
+            if noh:
+                is_h = np.array([e.upper() == "H" for e in traj_elements_frame])
+                traj_elements_frame = traj_elements_frame[~is_h]
+                traj_coords_frame = traj_coords_frame[~is_h]
+
+            if len(ref_atoms) != len(traj_elements_frame):
+                raise ValueError(
+                    f"Frame {total_frames}: Reference and trajectory atom counts mismatch "
+                    f"(after `noh` filter): {len(ref_atoms)} vs {len(traj_elements_frame)}."
+                )
+
             if rdkit_reorder:
                 try:
+                    traj_atomic_num = _atom_numbers_from_symbols(traj_elements_frame)
                     probe_mol = _rdkit_mol_from_xyz(
                         traj_atomic_num,
-                        traj_atoms.positions,
-                        removeHs=noh,
+                        traj_coords_frame,
+                        removeHs=False,  # H have been manually removed if noh=True
                     )
                     mapping = _rdkit_atom_map(probe_mol, rdkit_ref)
                 except Exception as e:
+                    print(f"Frame {total_frames}: Discarding due to RDKit alignment failure: {e}")
                     discarded += 1
                     if discarded_xyz:
-                        discarded_frames.append(traj_atoms.positions.copy())
+                        discarded_frames.append(original_coords.copy())
                     continue
             else:
                 mapping = _compute_mapping(
                     ref_atoms.positions,
                     ref_elements,
-                    traj_atoms.positions,
-                    traj_elements,
+                    traj_coords_frame,
+                    traj_elements_frame,
                 )
-            coords = traj_atoms.positions[mapping].copy()
+            coords = traj_coords_frame[mapping].copy()
             reordered.append(coords)
-        if rdkit_reorder:
-            total = len(trajectory.trajectory)
-            print(f"Discarded {discarded}/{total} frames due to RDKit alignment failures.")
-            if discarded_xyz and discarded_frames:
-                _write_xyz_frames(
-                    discarded_xyz,
-                    traj_elements,
-                    discarded_frames,
-                    "Discarded frame",
-                )
+
+        if total_frames > 0:
+            print(f"Discarded {discarded}/{total_frames} frames due to RDKit alignment failures.")
+        if discarded_xyz and discarded_frames:
+            # Note: writing with reference elements for consistency
+            _write_xyz_frames(
+                discarded_xyz,
+                ref_elements,  # Elements from the reference topology
+                discarded_frames,
+                "Discarded frame",
+            )
         if not reordered:
             raise ValueError("No frames left after RDKit alignment filtering.")
         if noh:
@@ -491,7 +542,6 @@ def parse_args(argv=None):
     if argv is not None:
         return parser.parse_args(argv)
     return parser.parse_args()
-
 
 def main():
     args = parse_args()
