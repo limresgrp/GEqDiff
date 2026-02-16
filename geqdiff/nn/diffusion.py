@@ -90,7 +90,8 @@ class ForwardDiffusionModule(GraphModuleMixin, torch.nn.Module):
 
         eps_optimal = None
 
-        if self.use_aot:
+        # TorchScript is used for deployment/inference. Keep AOT (SciPy) only in eager mode.
+        if self.use_aot and (not torch.jit.is_scripting()):
             # --- Approximated Optimal Transport (AOT) with Padding & Masking ---
             
             # 1. Get molecule sizes and find the max size for padding
