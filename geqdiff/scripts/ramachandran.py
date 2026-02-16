@@ -485,22 +485,28 @@ def plot_ramachandran(
         density=True,
     )
 
-    plt.figure(figsize=(6, 5))
-    plt.pcolormesh(xedges, yedges, hist.T, cmap="viridis", shading="auto")
-    plt.xlabel("Phi (deg)")
-    plt.ylabel("Psi (deg)")
-    plt.xlim(-180, 180)
-    plt.ylim(-180, 180)
-    plt.gca().set_aspect("equal", adjustable="box")
-    plt.colorbar(label="Density")
-    plt.title("Ramachandran Density")
+    # Render bins with no samples as white so they are distinct from low nonzero density.
+    hist_plot = np.ma.masked_where(hist.T == 0.0, hist.T)
+    cmap = plt.cm.viridis.copy()
+    cmap.set_bad(color="white")
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    mesh = ax.pcolormesh(xedges, yedges, hist_plot, cmap=cmap, shading="auto")
+    ax.set_facecolor("white")
+    ax.set_xlabel("Phi (deg)")
+    ax.set_ylabel("Psi (deg)")
+    ax.set_xlim(-180, 180)
+    ax.set_ylim(-180, 180)
+    ax.set_aspect("equal", adjustable="box")
+    fig.colorbar(mesh, ax=ax, label="Density")
+    ax.set_title("Ramachandran Density")
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300)
     if show:
         plt.show()
-    plt.close()
+    plt.close(fig)
 
 
 def parse_args(argv=None):
