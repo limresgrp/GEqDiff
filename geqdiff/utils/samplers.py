@@ -1,13 +1,13 @@
 import torch
 from abc import ABC, abstractmethod
 
-from geqdiff.utils.noise_schedulers import NoiseScheduler
+from geqdiff.utils.noise_schedulers import FlowMatchingScheduler, NoiseScheduler
 
 
 
 class Sampler(ABC, torch.nn.Module):
     """Abstract base class for all samplers."""
-    def __init__(self, scheduler: NoiseScheduler):
+    def __init__(self, scheduler: torch.nn.Module):
         super().__init__()
         self.scheduler = scheduler
         self.T = scheduler.T
@@ -96,4 +96,22 @@ class RectifiedFlowSampler(Sampler):
         # This ensures the variance schedule is followed correctly.
         x_t_minus_1 += torch.sqrt(1 - alpha_bar_t_prev) * eps_pred
         
+        return x_t_minus_1
+
+
+class FlowMatchingSampler(Sampler):
+    """Integrates the learned flow field backward from noise to data."""
+
+    def __init__(self, scheduler: FlowMatchingScheduler):
+        super().__init__(scheduler)
+
+    @torch.no_grad()
+    def step(self, x_t: torch.Tensor, t: int, t_prev: int, velocity_pred: torch.Tensor):
+        if t_prev < 0:
+            return x_t
+
+        tau_t = self.scheduler.tau[int(t)]
+        tau_prev = self.scheduler.tau[int(t_prev)]
+        dt = tau_t - tau_prev
+        x_t_minus_1 = x_t - dt * velocity_pred
         return x_t_minus_1

@@ -15,7 +15,16 @@ except ImportError:
 
 from geqdiff.utils.SDFReader import SDFParser
 from geqdiff.data import AtomicDataDict
-from geqdiff.utils import NoiseScheduler, Sampler, DDPMSampler, DDIMSampler, RectifiedFlowSampler, center_pos
+from geqdiff.utils import (
+    DDPMSampler,
+    DDIMSampler,
+    FlowMatchingSampler,
+    FlowMatchingScheduler,
+    NoiseScheduler,
+    RectifiedFlowSampler,
+    Sampler,
+    center_pos,
+)
 from geqtrain.train.components.checkpointing import CheckpointHandler
 
 # --- Helper functions ---
@@ -118,7 +127,7 @@ def sample_from_model(
     ddim_eta: float = 0.0,
     save_trajectory: bool = False,
     save_npz: bool = False,
-    field: str = 'noise',
+    field: Optional[str] = None,
     predict_node_types_field: Optional[str] = None,
 ):
     """
@@ -127,6 +136,9 @@ def sample_from_model(
     model.to(device)
     model.eval()
     sampler.to(device)
+
+    if field is None:
+        field = "velocity" if isinstance(sampler, FlowMatchingSampler) else "noise"
 
     print(f"Starting sampling on device: {device}")
     print(f"Using sampler: {sampler.__class__.__name__} with r_max = {r_max:.2f}")
@@ -142,13 +154,15 @@ def sample_from_model(
     if initial_pos is not None and t_init is not None:
         if t_init >= T_max:
             raise ValueError(f"t_init ({t_init}) must be less than T_max ({T_max})")
-        print(f"Starting from provided structure, noising to t={t_init}...")
+        if isinstance(sampler, FlowMatchingSampler):
+            print(f"Starting from provided structure, interpolating to t={t_init}...")
+        else:
+            print(f"Starting from provided structure, noising to t={t_init}...")
         
         x_0 = initial_pos.to(device).unsqueeze(0).repeat(batch_size, 1, 1).reshape(-1, 3)
         noise = center_pos(torch.randn_like(x_0), batch)
-        # Use the sampler's scheduler for the forward process
-        alpha_t, sigma_t = sampler.scheduler(torch.tensor([t_init], device=device))
-        x_t = center_pos(alpha_t * x_0 + sigma_t * noise, batch)
+        coeff_data, coeff_noise = sampler.scheduler(torch.tensor([t_init], device=device))
+        x_t = center_pos(coeff_data * x_0 + coeff_noise * noise, batch)
         start_step = t_init
     else:
         print("Starting from pure random noise...")
@@ -165,7 +179,8 @@ def sample_from_model(
         trajectory = []
 
     npz_positions = []
-    npz_noise = []
+    npz_field_values = []
+    npz_tau = []
     npz_alpha_bar = []
     npz_alphas = []
     npz_betas = []
@@ -174,19 +189,23 @@ def sample_from_model(
     npz_t_prev = []
 
     # 2. Define the timestep sequence for the reverse process
-    if isinstance(sampler, (DDIMSampler, RectifiedFlowSampler)):
+    if isinstance(sampler, (DDIMSampler, RectifiedFlowSampler, FlowMatchingSampler)):
         if steps is None:
-            if isinstance(sampler, DDIMSampler): steps = 50
-            elif isinstance(sampler, RectifiedFlowSampler): steps = 20
+            if isinstance(sampler, DDIMSampler):
+                steps = 50
+            elif isinstance(sampler, RectifiedFlowSampler):
+                steps = 20
+            else:
+                steps = 20
         time_steps = np.linspace(0, start_step, steps, dtype=int)[::-1].copy()
         print(f"Using {sampler.__class__.__name__} with {len(time_steps)} steps from t={start_step}.")
     else: # DDPMSampler
         time_steps = np.arange(start_step + 1)[::-1].copy()
         print(f"Using DDPM with {len(time_steps)} steps from t={start_step}.")
 
-    # 3. The main reverse diffusion loop
+    # 3. Main sampling loop
 
-    for i, t in enumerate(tqdm(time_steps, desc="Reverse Diffusion")):
+    for i, t in enumerate(tqdm(time_steps, desc="Sampling")):
         try:
             # Pre-step check for numerical stability
             if not torch.isfinite(x_t).all():
@@ -205,7 +224,7 @@ def sample_from_model(
             }
 
             out_dict = model(data)
-            eps_pred = out_dict[field]
+            model_field_pred = out_dict[field]
 
             if predict_node_types_field is not None and predict_node_types_field in out_dict:
                 node_type_logits = out_dict[predict_node_types_field]
@@ -213,22 +232,25 @@ def sample_from_model(
 
             if save_npz:
                 npz_positions.append(x_t.reshape(batch_size, num_atoms, 3).cpu().numpy())
-                npz_noise.append(eps_pred.reshape(batch_size, num_atoms, 3).cpu().numpy())
-                npz_alpha_bar.append(sampler.scheduler.alpha_bar[t].item())
-                npz_alphas.append(sampler.scheduler.alphas[t].item())
-                npz_betas.append(sampler.scheduler.betas[t].item())
-                npz_sqrt_alpha_bar.append(sampler.scheduler.sqrt_alpha_bar[t].item())
-                npz_sqrt_one_minus_alpha_bar.append(sampler.scheduler.sqrt_one_minus_alpha_bar[t].item())
+                npz_field_values.append(model_field_pred.reshape(batch_size, num_atoms, 3).cpu().numpy())
                 npz_t_prev.append(t_prev)
+                if isinstance(sampler, FlowMatchingSampler):
+                    npz_tau.append(sampler.scheduler.tau[t].item())
+                else:
+                    npz_alpha_bar.append(sampler.scheduler.alpha_bar[t].item())
+                    npz_alphas.append(sampler.scheduler.alphas[t].item())
+                    npz_betas.append(sampler.scheduler.betas[t].item())
+                    npz_sqrt_alpha_bar.append(sampler.scheduler.sqrt_alpha_bar[t].item())
+                    npz_sqrt_one_minus_alpha_bar.append(sampler.scheduler.sqrt_one_minus_alpha_bar[t].item())
 
             # Call the sampler's step method based on its type
             if isinstance(sampler, DDPMSampler):
-                x_t = sampler.step(x_t, t, eps_pred)
-            else: # Handles both DDIM and RectifiedFlow
+                x_t = sampler.step(x_t, t, model_field_pred)
+            else:
                 if isinstance(sampler, DDIMSampler):
-                    x_t = sampler.step(x_t, t, t_prev, eps_pred, eta=ddim_eta)
-                else: # RectifiedFlowSampler
-                    x_t = sampler.step(x_t, t, t_prev, eps_pred)
+                    x_t = sampler.step(x_t, t, t_prev, model_field_pred, eta=ddim_eta)
+                else:
+                    x_t = sampler.step(x_t, t, t_prev, model_field_pred)
                 
             x_t = center_pos(x_t, batch)
 
@@ -244,19 +266,23 @@ def sample_from_model(
 
     print("Sampling complete.")
     npz_data = None
-    if save_npz and npz_positions and npz_noise:
-        steps_saved = min(len(npz_positions), len(npz_noise))
+    if save_npz and npz_positions and npz_field_values:
+        steps_saved = min(len(npz_positions), len(npz_field_values))
         npz_data = {
             "positions": np.stack(npz_positions[:steps_saved], axis=1),
-            "noise": np.stack(npz_noise[:steps_saved], axis=1),
+            "model_field": np.stack(npz_field_values[:steps_saved], axis=1),
             "time_steps": np.array(time_steps[:steps_saved], dtype=int),
             "t_prev": np.array(npz_t_prev[:steps_saved], dtype=int),
-            "alpha_bar": np.array(npz_alpha_bar[:steps_saved], dtype=np.float32),
-            "alphas": np.array(npz_alphas[:steps_saved], dtype=np.float32),
-            "betas": np.array(npz_betas[:steps_saved], dtype=np.float32),
-            "sqrt_alpha_bar": np.array(npz_sqrt_alpha_bar[:steps_saved], dtype=np.float32),
-            "sqrt_one_minus_alpha_bar": np.array(npz_sqrt_one_minus_alpha_bar[:steps_saved], dtype=np.float32),
         }
+        npz_data[field] = npz_data["model_field"]
+        if isinstance(sampler, FlowMatchingSampler):
+            npz_data["tau"] = np.array(npz_tau[:steps_saved], dtype=np.float32)
+        else:
+            npz_data["alpha_bar"] = np.array(npz_alpha_bar[:steps_saved], dtype=np.float32)
+            npz_data["alphas"] = np.array(npz_alphas[:steps_saved], dtype=np.float32)
+            npz_data["betas"] = np.array(npz_betas[:steps_saved], dtype=np.float32)
+            npz_data["sqrt_alpha_bar"] = np.array(npz_sqrt_alpha_bar[:steps_saved], dtype=np.float32)
+            npz_data["sqrt_one_minus_alpha_bar"] = np.array(npz_sqrt_one_minus_alpha_bar[:steps_saved], dtype=np.float32)
     
     final_node_types = node_types_batch.reshape(batch_size, num_atoms).cpu()
     return x_t.reshape(batch_size, num_atoms, 3).cpu().numpy(), trajectory, npz_data, final_node_types
@@ -292,15 +318,19 @@ def main(args=None):
 
     # --- 2. Initialize Scheduler and Sampler ---
     
-    scheduler = NoiseScheduler(T=args.Tmax, schedule_type=args.schedule_type)
-    
-    # Instantiate the chosen sampler
+    if args.sampler == "flow":
+        scheduler = FlowMatchingScheduler(T=args.Tmax)
+    else:
+        scheduler = NoiseScheduler(T=args.Tmax, schedule_type=args.schedule_type)
+
     if args.sampler == "ddpm":
         sampler = DDPMSampler(scheduler)
     elif args.sampler == "ddim":
         sampler = DDIMSampler(scheduler)
     elif args.sampler == "rectified":
         sampler = RectifiedFlowSampler(scheduler)
+    elif args.sampler == "flow":
+        sampler = FlowMatchingSampler(scheduler)
     else:
         raise ValueError(f"Unknown sampler: {args.sampler}")
 
@@ -317,10 +347,11 @@ def main(args=None):
     if args.num_samples > 1:
         print(f"Sampling {args.num_samples} molecules in batches of {batch_size}.")
 
+    schedule_label = args.schedule_type if args.sampler != "flow" else "linear_path"
     final_batches = []
     diffusion_trajectory = None
     npz_positions_batches = []
-    npz_noise_batches = []
+    npz_field_batches = []
     final_node_types_batches = []
     npz_meta = None
     for start_idx in range(0, args.num_samples, batch_size):
@@ -352,9 +383,9 @@ def main(args=None):
             diffusion_trajectory = trajectory
         if args.save_npz and npz_data is not None:
             npz_positions_batches.append(npz_data["positions"])
-            npz_noise_batches.append(npz_data["noise"])
+            npz_field_batches.append(npz_data["model_field"])
             if npz_meta is None:
-                npz_meta = {k: v for k, v in npz_data.items() if k not in ("positions", "noise")}
+                npz_meta = {k: v for k, v in npz_data.items() if k not in ("positions", "model_field", args.field or "noise", "velocity")}
 
     final_positions = np.concatenate(final_batches, axis=0)
     final_node_types = np.concatenate(final_node_types_batches, axis=0)
@@ -373,19 +404,25 @@ def main(args=None):
         # Default behavior: save in sampling_results with auto-generated name
         output_dir = Path("sampling_results")
         output_dir.mkdir(exist_ok=True)
-        file_name_stem = f"generated_molecule_{args.sampler}_{args.schedule_type}"
+        file_name_stem = f"generated_molecule_{args.sampler}_{schedule_label}"
         output_file = output_dir / f"{file_name_stem}.xyz"
-        traj_base_file = output_dir / f"trajectory_{args.sampler}_{args.schedule_type}"
-        samples_traj_base = output_dir / f"samples_{args.sampler}_{args.schedule_type}"
+        traj_base_file = output_dir / f"trajectory_{args.sampler}_{schedule_label}"
+        samples_traj_base = output_dir / f"samples_{args.sampler}_{schedule_label}"
     
     with open(output_file, "w") as f:
         for sample_idx, sample_positions in enumerate(final_positions):
             f.write(f"{num_atoms}\n")
             if args.num_samples == 1:
-                comment = f"Generated by {args.sampler} sampler with {args.schedule_type} schedule. Selection: '{args.selection}'"
+                if args.sampler == "flow":
+                    comment = f"Generated by {args.sampler} sampler. Selection: '{args.selection}'"
+                else:
+                    comment = f"Generated by {args.sampler} sampler with {args.schedule_type} schedule. Selection: '{args.selection}'"
             else:
-                comment = (f"Sample {sample_idx + 1}/{args.num_samples} generated by {args.sampler} "
-                           f"sampler with {args.schedule_type} schedule. Selection: '{args.selection}'")
+                if args.sampler == "flow":
+                    comment = f"Sample {sample_idx + 1}/{args.num_samples} generated by {args.sampler} sampler. Selection: '{args.selection}'"
+                else:
+                    comment = (f"Sample {sample_idx + 1}/{args.num_samples} generated by {args.sampler} "
+                               f"sampler with {args.schedule_type} schedule. Selection: '{args.selection}'")
             f.write(f"{comment}\n")
             
             if args.predict_node_types_field:
@@ -414,24 +451,28 @@ def main(args=None):
             else:
                 save_trajectory_with_mda(str(traj_file), atom_group, list(final_positions))
 
-    if args.save_npz and npz_positions_batches and npz_noise_batches:
+    if args.save_npz and npz_positions_batches and npz_field_batches:
         full_positions = np.concatenate(npz_positions_batches, axis=0)
-        full_noise = np.concatenate(npz_noise_batches, axis=0)
+        full_field = np.concatenate(npz_field_batches, axis=0)
         if args.output:
             npz_file = output_base.with_name(output_base.stem + "_full").with_suffix(".npz")
         else:
-            npz_file = output_dir / f"full_{args.sampler}_{args.schedule_type}.npz"
+            npz_file = output_dir / f"full_{args.sampler}_{schedule_label}.npz"
+        field_name = args.field
+        if field_name is None:
+            field_name = "velocity" if args.sampler == "flow" else "noise"
         npz_payload = {
             "positions": full_positions,
-            "noise": full_noise,
+            "model_field": full_field,
             "sampler": np.array(args.sampler),
-            "schedule_type": np.array(args.schedule_type),
+            "schedule_type": np.array(schedule_label),
             "t_init": np.array(-1 if args.t_init is None else args.t_init),
             "steps": np.array(-1 if args.steps is None else args.steps),
             "ddim_eta": np.array(args.ddim_eta),
-            "field": np.array(args.field),
+            "field": np.array(field_name),
             "r_max": np.array(float(r_max)),
         }
+        npz_payload[field_name] = full_field
         if npz_meta is not None:
             npz_payload.update(npz_meta)
         np.savez_compressed(npz_file, **npz_payload)
@@ -441,7 +482,7 @@ def parse_args(arg_list=None):
     parser = argparse.ArgumentParser(description="GeqDiff Sampling Script")
     parser.add_argument("-m", "--model", type=str, required=True, help="Path to deployed model or .pth model weights.")
     parser.add_argument("-i", "--input_structure", type=str, required=True, help="Path to an input structure file (PDB, GRO, etc.).")
-    parser.add_argument("--schedule_type", type=str, required=True, choices=["linear", "cosine"], help="Noise schedule to use.")
+    parser.add_argument("--schedule_type", type=str, default="cosine", choices=["linear", "cosine"], help="Noise schedule to use for diffusion samplers. Ignored by flow matching.")
     parser.add_argument("-o", "--output", type=str, default=None, help="Base path for the output file(s). Suffixes will be added automatically.")
     parser.add_argument("--selection", type=str, default="all", help="MDAnalysis selection string (e.g., 'not name H*').")
     parser.add_argument("--mol_index", type=int, default=0, help="Index of the molecule to use in a multi-molecule file (e.g., SDF). Default is 0.")
@@ -450,10 +491,10 @@ def parse_args(arg_list=None):
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size for sampling. Defaults to --num_samples.")
     parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
-    parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim", "rectified"], help="Sampler to use.")
+    parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim", "rectified", "flow"], help="Sampler to use.")
     parser.add_argument("-T", "--Tmax", type=int, default=1000, help="Maximum number of diffusion timesteps.")
-    parser.add_argument("-f", "--field", type=str, default="noise", help="Out field where model saves predicted noise.")
-    parser.add_argument("--steps", type=int, default=None, help="Number of steps for DDIM or RectifiedFlow sampling.")
+    parser.add_argument("-f", "--field", type=str, default=None, help="Prediction field to read from the model. Defaults to 'noise' for diffusion samplers and 'velocity' for flow matching.")
+    parser.add_argument("--steps", type=int, default=None, help="Number of steps for DDIM, RectifiedFlow, or flow matching sampling.")
     parser.add_argument("--ddim_eta", type=float, default=0.0, help="Eta parameter for DDIM sampling (controls stochasticity).")
     parser.add_argument("--save_trajectory", action="store_true", help="Save trajectory. For a single sample, saves the diffusion trajectory. For multiple samples, saves the final samples as a trajectory.")
     parser.add_argument("--save_npz", action="store_true", help="Save per-step positions and predicted noise to an NPZ file.")

@@ -65,3 +65,34 @@ class NoiseScheduler(torch.nn.Module):
         alpha = self.sqrt_alpha_bar[t]
         sigma = self.sqrt_one_minus_alpha_bar[t]
         return alpha, sigma
+
+
+@compile_mode("script")
+class FlowMatchingScheduler(torch.nn.Module):
+    """
+    Linear interpolation coefficients for flow matching.
+
+    The trajectory is parameterized as:
+        x_t = (1 - tau) * x_data + tau * x_noise
+    with tau in [0, 1].
+    """
+
+    T: int
+
+    def __init__(self, T: int):
+        super().__init__()
+        if T < 1:
+            raise ValueError(f"T must be >= 1, got {T}")
+        self.T = int(T)
+        tau = torch.linspace(0.0, 1.0, steps=self.T)
+        self.register_buffer("tau", tau)
+        self.register_buffer("data_scale", 1.0 - tau)
+        self.register_buffer("noise_scale", tau)
+
+    def forward(self, t: torch.Tensor):
+        t = t.to(dtype=torch.float32)
+        if self.T == 1:
+            tau = torch.zeros_like(t)
+        else:
+            tau = torch.clamp(t / float(self.T - 1), min=0.0, max=1.0)
+        return 1.0 - tau, tau
