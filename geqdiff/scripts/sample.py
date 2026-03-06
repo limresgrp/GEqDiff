@@ -29,7 +29,13 @@ from geqtrain.train.components.checkpointing import CheckpointHandler
 
 # --- Helper functions ---
 
-def load_structure(filepath: str, selection: str = "all", mol_index: int = 0, noh: bool = False):
+def load_structure(
+    filepath: str,
+    selection: str = "all",
+    mol_index: int = 0,
+    noh: bool = False,
+    node_types_map: Optional[list] = None,
+):
     """Loads a structure using MDAnalysis, applies a selection, and extracts data."""
     if mda is None:
         raise ImportError("MDAnalysis is required to read structure files. Please install it: `pip install MDAnalysis`")
@@ -63,15 +69,28 @@ def load_structure(filepath: str, selection: str = "all", mol_index: int = 0, no
     except Exception:
         elements = [atom.type for atom in atom_group]
 
-    if noh:
-        element_map = {'C': 0, 'N': 1, 'O': 2, 'S': 3, 'F': 4, 'Cl': 5, 'Br': 6, 'I': 7}
+    if node_types_map:
+        element_map = {name: idx for idx, name in enumerate(node_types_map)}
+        node_types_idx = []
+        for el in elements:
+            idx = element_map.get(el)
+            if idx is None:
+                idx = element_map.get(el.capitalize())
+            if idx is None:
+                idx = element_map.get(el.upper())
+            node_types_idx.append(-1 if idx is None else idx)
     else:
-        element_map = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'S': 4, 'F': 5, 'Cl': 6, 'Br': 7, 'I': 8}
-    node_types = torch.tensor([element_map.get(el, -1) for el in elements], dtype=torch.long)
+        if noh:
+            element_map = {'C': 0, 'N': 1, 'O': 2, 'S': 3, 'F': 4, 'Cl': 5, 'Br': 6, 'I': 7}
+        else:
+            element_map = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'S': 4, 'F': 5, 'Cl': 6, 'Br': 7, 'I': 8}
+        node_types_idx = [element_map.get(el, -1) for el in elements]
+
+    node_types = torch.tensor(node_types_idx, dtype=torch.long)
 
     if (node_types == -1).any():
-        unknown_elements = set(el for el, nt in zip(elements, node_types) if nt == -1)
-        print(f"Warning: Unknown elements found and mapped to -1: {unknown_elements}")
+        unknown_elements = set(el for el, nt in zip(elements, node_types.tolist()) if nt == -1)
+        raise ValueError(f"Unknown elements found in structure: {sorted(unknown_elements)}")
 
     return center_pos(positions), node_types, elements, atom_group
 
@@ -170,6 +189,16 @@ def infer_node_type_metadata(config, node_types_map_arg: Optional[str]):
     if num_types is None and node_types_map is not None:
         num_types = len(node_types_map)
     return node_types_map, num_types
+
+
+def infer_model_Tmax(config):
+    model_cfg = config.get("model", {})
+    stack = model_cfg.get("stack", [])
+    if isinstance(stack, list) and len(stack) > 0 and isinstance(stack[0], dict):
+        tmax = stack[0].get("Tmax")
+        if tmax is not None:
+            return int(tmax)
+    return None
 
 def save_trajectory_with_mda(output_path: str, atom_group: mda.core.groups.AtomGroup, trajectory_coords: list):
     """Saves a trajectory using MDAnalysis."""
@@ -389,6 +418,8 @@ def main(args=None):
     # --- 1. Load Model and Initial Structure ---
     
     model, config, _ = CheckpointHandler.load_model(args.model, device=args.device)
+    node_types_map, num_types = infer_node_type_metadata(config, args.node_types_map)
+
     if args.input_structure is not None and (args.min_atoms is not None or args.max_atoms is not None):
         raise ValueError("Use either --input_structure or --min_atoms/--max_atoms, not both.")
     if args.input_structure is None:
@@ -407,9 +438,9 @@ def main(args=None):
             selection=args.selection,
             mol_index=args.mol_index,
             noh=args.noh,
+            node_types_map=node_types_map,
         )
-
-    node_types_map, num_types = infer_node_type_metadata(config, args.node_types_map)
+        
     if args.predict_node_types_field and node_types_map is None:
         raise ValueError(
             "Could not determine atom labels for predicted node types. Pass --node_types_map or ensure the checkpoint config has type_names."
@@ -426,6 +457,16 @@ def main(args=None):
 
     # --- 2. Initialize Scheduler and Sampler ---
     
+    model_Tmax = infer_model_Tmax(config)
+    if args.Tmax is None:
+        args.Tmax = model_Tmax if model_Tmax is not None else 1000
+    elif model_Tmax is not None and int(args.Tmax) != int(model_Tmax):
+        print(
+            f"Warning: requested Tmax={args.Tmax} but model was trained with Tmax={model_Tmax}. "
+            f"Overriding Tmax to {model_Tmax}."
+        )
+        args.Tmax = int(model_Tmax)
+
     if args.sampler == "flow":
         scheduler = FlowMatchingScheduler(T=args.Tmax)
     else:
@@ -639,7 +680,7 @@ def parse_args(arg_list=None):
     parser.add_argument("--t_init", type=int, default=None, help="Timestep to start denoising from. If not set, starts from pure noise.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
     parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim", "rectified", "flow"], help="Sampler to use.")
-    parser.add_argument("-T", "--Tmax", type=int, default=1000, help="Maximum number of diffusion timesteps.")
+    parser.add_argument("-T", "--Tmax", type=int, default=None, help="Maximum number of diffusion timesteps. Defaults to the model's Tmax.")
     parser.add_argument("-f", "--field", type=str, default=None, help="Prediction field to read from the model. Defaults to 'noise' for diffusion samplers and 'velocity' for flow matching.")
     parser.add_argument("--steps", type=int, default=None, help="Number of steps for DDIM, RectifiedFlow, or flow matching sampling.")
     parser.add_argument("--ddim_eta", type=float, default=0.0, help="Eta parameter for DDIM sampling (controls stochasticity).")
