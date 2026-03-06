@@ -21,6 +21,8 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
         out_field: str = "velocity",
+        alpha_field: str = AtomicDataDict.DIFFUSION_ALPHA_KEY,
+        sigma_field: str = AtomicDataDict.DIFFUSION_SIGMA_KEY,
         Tmax: int = 100,
         Tmax_train: Optional[int] = None,
         t_embedder=SinusoidalPositionEmbedding,
@@ -36,7 +38,9 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
 
         self.out_field = out_field
         self.out_target_field = self.out_field + "_target"
-        self.ref_data_keys = [self.out_target_field]
+        self.alpha_field = alpha_field
+        self.sigma_field = sigma_field
+        self.ref_data_keys = [self.out_target_field, self.alpha_field, self.sigma_field]
 
         self.T = int(Tmax)
         if Tmax_train is None:
@@ -62,13 +66,18 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
             irreps_in=irreps_in,
             irreps_out={
                 AtomicDataDict.CONDITIONING_KEY: o3.Irreps(f"{conditioning_dim}x0e"),
+                self.alpha_field: o3.Irreps("1x0e"),
+                self.sigma_field: o3.Irreps("1x0e"),
             },
         )
 
     def _reverse(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         t = data[AtomicDataDict.T_SAMPLED_KEY].to(dtype=torch.float32)
         batch = data[AtomicDataDict.BATCH_KEY]
+        data_scale, noise_scale = self.flow_scheduler(t)
         data[AtomicDataDict.CONDITIONING_KEY] = self.t_embedder(t)[batch]
+        data[self.alpha_field] = data_scale
+        data[self.sigma_field] = noise_scale
         return data
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
@@ -122,4 +131,6 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
         data[self.out_target_field] = noise - x
         data[AtomicDataDict.CONDITIONING_KEY] = self.t_embedder(t)[batch]
         data[AtomicDataDict.T_SAMPLED_KEY] = t
+        data[self.alpha_field] = data_scale
+        data[self.sigma_field] = noise_scale
         return data

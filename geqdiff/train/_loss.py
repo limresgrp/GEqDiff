@@ -17,19 +17,22 @@ except Exception:
 
 class DiffusionWeightedCrossEntropyLoss:
     """
-    Cross-entropy with per-sample weights derived from diffusion scheduler outputs
-    (typically alpha or sigma).
+    Cross-entropy with per-sample weights derived from diffusion or flow-time
+    scheduler outputs.
+
+    For flow matching, use the same keys with the interpretation:
+      - alpha -> data coefficient, i.e. 1 - tau
+      - sigma -> noise coefficient, i.e. tau
     """
 
     def __init__(
         self,
         weight_source: str = "alpha",
         weight_key: Optional[str] = None,
-        invert_weight: Optional[bool] = None,
         weight_power: float = 1.0,
         min_weight: float = 0.0,
         max_weight: float = 1.0,
-        normalize_weights: bool = True,
+        normalize_weights: bool = False,
         detach_weight: bool = True,
         node_level_filter: str = "auto",
         eps: float = 1e-8,
@@ -45,8 +48,7 @@ class DiffusionWeightedCrossEntropyLoss:
                     f"Unknown weight_source='{weight_source}'. Expected one of: ['alpha', 'sigma'] "
                     "or pass an explicit `weight_key`."
                 )
-        if invert_weight is None:
-            invert_weight = (weight_source == "sigma")
+        invert_weight = (weight_source == "sigma")
 
         self.weight_key = weight_key
         self.invert_weight = bool(invert_weight)
@@ -77,8 +79,8 @@ class DiffusionWeightedCrossEntropyLoss:
             w = ref[self.weight_key]
         else:
             raise KeyError(
-                f"Missing diffusion weight key '{self.weight_key}' in both `pred` and `ref`. "
-                "Make sure ForwardDiffusionModule stores it in the output dict."
+                f"Missing weight key '{self.weight_key}' in both `pred` and `ref`. "
+                "Make sure the first model module stores it in the output dict."
             )
         if not torch.is_tensor(w):
             raise TypeError(f"Weight key '{self.weight_key}' must be a tensor, got {type(w)}.")
