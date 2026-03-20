@@ -107,11 +107,11 @@ class FlowMatchingSampler(Sampler):
 
     @torch.no_grad()
     def step(self, x_t: torch.Tensor, t: int, t_prev: int, velocity_pred: torch.Tensor):
+        tau_t = self.scheduler.tau[int(t)].to(device=x_t.device, dtype=x_t.dtype)
         if t_prev < 0:
-            return x_t
-
-        tau_t = self.scheduler.tau[int(t)]
-        tau_prev = self.scheduler.tau[int(t_prev)]
-        dt = tau_t - tau_prev
-        x_t_minus_1 = x_t - dt * velocity_pred
+            tau_prev = torch.tensor(0.0, device=x_t.device, dtype=x_t.dtype)
+        else:
+            tau_prev = self.scheduler.tau[int(t_prev)].to(device=x_t.device, dtype=x_t.dtype)
+        dtau = tau_prev - tau_t
+        x_t_minus_1 = x_t + dtau * velocity_pred
         return x_t_minus_1
