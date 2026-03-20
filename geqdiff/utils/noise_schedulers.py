@@ -73,7 +73,7 @@ class FlowMatchingScheduler(torch.nn.Module):
     Linear interpolation coefficients for flow matching.
 
     The trajectory is parameterized as:
-        x_t = (1 - tau) * x_data + tau * x_noise
+        x_tau = (1 - tau) * x_data + tau * x_noise
     with tau in [0, 1].
     """
 
@@ -88,11 +88,13 @@ class FlowMatchingScheduler(torch.nn.Module):
         self.register_buffer("tau", tau)
         self.register_buffer("data_scale", 1.0 - tau)
         self.register_buffer("noise_scale", tau)
+        self.register_buffer("ddata_scale_dtau", -torch.ones_like(tau))
+        self.register_buffer("dnoise_scale_dtau", torch.ones_like(tau))
 
-    def forward(self, t: torch.Tensor):
-        t = t.to(dtype=torch.float32)
-        if self.T == 1:
-            tau = torch.zeros_like(t)
-        else:
-            tau = torch.clamp(t / float(self.T - 1), min=0.0, max=1.0)
+    def forward(self, tau: torch.Tensor):
+        tau = torch.clamp(tau.to(dtype=torch.float32), min=0.0, max=1.0)
         return 1.0 - tau, tau
+
+    def derivatives(self, tau: torch.Tensor):
+        tau = tau.to(dtype=torch.float32)
+        return -torch.ones_like(tau), torch.ones_like(tau)
