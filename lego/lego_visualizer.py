@@ -170,18 +170,12 @@ def _face_vertices(voxel_center: np.ndarray, direction: np.ndarray) -> np.ndarra
     )
 
 
-def _legend_group(sample: Dict, brick_index: int) -> tuple[str, str, bool]:
+def _paired_legend_group(sample: Dict, brick_index: int) -> str:
     mask = np.asarray(sample.get("sampled_brick_mask", np.zeros((0,), dtype=bool)), dtype=bool).reshape(-1)
     if mask.size == 0:
-        return "all_blocks", "Blocks", brick_index == 0
-    if bool(mask[brick_index]):
-        group_size = int(mask.sum())
-        first_index = int(np.flatnonzero(mask)[0]) if group_size > 0 else brick_index
-        return "diffused_blocks", "Diffused blocks", brick_index == first_index
-    fixed_mask = ~mask
-    group_size = int(fixed_mask.sum())
-    first_index = int(np.flatnonzero(fixed_mask)[0]) if group_size > 0 else brick_index
-    return "fixed_blocks", "Fixed blocks", brick_index == first_index
+        return f"brick_pair_{brick_index:03d}"
+    prefix = "diffused" if bool(mask[brick_index]) else "fixed"
+    return f"{prefix}_brick_pair_{brick_index:03d}"
 
 
 def _brick_name(sample: Dict, brick_index: int, brick_type: str, dipole_strength: float) -> str:
@@ -232,7 +226,7 @@ def _mesh_trace_from_brick(
             color = _dipole_face_color(world_voxel + 0.5 * direction.astype(np.float32), brick_center, dipole)
             facecolor.extend([color, color])
 
-    group_key, group_title, show_group_title = _legend_group(sample, brick_index)
+    group_key = _paired_legend_group(sample, brick_index)
     strength = float(np.linalg.norm(dipole))
     name = _brick_name(sample, brick_index, brick_type, strength)
     return go.Mesh3d(
@@ -250,7 +244,6 @@ def _mesh_trace_from_brick(
             f"Dipole strength: {strength:.2f}<extra></extra>"
         ),
         legendgroup=group_key,
-        legendgrouptitle_text=group_title if show_group_title else None,
         showlegend=True,
         flatshading=True,
         opacity=1.0,
@@ -290,7 +283,7 @@ def _surface_trace_from_brick(
     palette = block_palette()
     base_color = palette.get(brick_type, "#808080")
     surfacecolor = np.zeros_like(mesh_x, dtype=np.float32)
-    group_key, group_title, show_group_title = _legend_group(sample, brick_index)
+    group_key = _paired_legend_group(sample, brick_index)
     strength = float(np.linalg.norm(dipole))
     name = _brick_name(sample, brick_index, brick_type, strength)
     return go.Surface(
@@ -307,7 +300,6 @@ def _surface_trace_from_brick(
         name=name,
         hovertemplate=f"{name}<extra></extra>",
         legendgroup=group_key,
-        legendgrouptitle_text=group_title if show_group_title else None,
         showlegend=True,
         contours={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
     )
@@ -675,20 +667,6 @@ def _build_html(
     if structure_view == "original" and not bool(initial_state["meta"]["has_original"]):
         structure_view = "sampled"
 
-    initial_traces = (
-        initial_state["structures"][structure_view][display_view]
-        + (
-            _serialize_traces(
-                _dipole_traces_from_specs(
-                    initial_state["structures"][structure_view]["dipole_specs"],
-                    length_scale=DEFAULT_DIPOLE_LENGTH,
-                )
-            )
-            if show_dipoles
-            else []
-        )
-        + initial_state["target"][target_view]
-    )
     base_layout = {
         "title": {
             "text": "LEGO SH / Dipole Visualizer",
@@ -706,12 +684,14 @@ def _build_html(
             "yanchor": "top",
             "bgcolor": "rgba(255,255,255,0.82)",
             "groupclick": "toggleitem",
+            "itemdoubleclick": False,
             "uirevision": "legend",
         },
         "scene": initial_state["scene"],
+        "scene2": initial_state["scene"],
         "uirevision": f"sample-{initial_index}",
     }
-    figure = go.Figure(data=initial_traces, layout=base_layout)
+    figure = go.Figure(data=[], layout=base_layout)
     plot_html = pio.to_html(
         figure,
         full_html=False,
@@ -722,12 +702,11 @@ def _build_html(
 
     state_json = json.dumps(states, cls=PlotlyJSONEncoder)
     layout_json = json.dumps(base_layout, cls=PlotlyJSONEncoder)
+    preferred_left_structure = json.dumps(structure_view)
     sample_options = "\n".join(
         f'<option value="{idx}"{" selected" if idx == initial_index else ""}>Sample {idx}</option>'
         for idx in range(len(samples))
     )
-    structure_selected = {"sampled": "", "original": ""}
-    structure_selected[structure_view] = " selected"
     display_selected = {"bricks": "", "surfaces": ""}
     display_selected[display_view] = " selected"
     target_selected = {"hidden": "", "wireframe": "", "filled": "", "voxels": ""}
@@ -755,7 +734,7 @@ def _build_html(
     }}
     .controls {{
       display: grid;
-      grid-template-columns: repeat(8, minmax(0, 1fr));
+      grid-template-columns: repeat(7, minmax(0, 1fr));
       gap: 12px;
       align-items: end;
       margin-bottom: 10px;
@@ -839,13 +818,6 @@ def _build_html(
         <select id="sample-select">{sample_options}</select>
       </div>
       <div class="control">
-        <label for="structure-select">Structure</label>
-        <select id="structure-select">
-          <option value="sampled"{structure_selected["sampled"]}>Sampled</option>
-          <option value="original"{structure_selected["original"]}>Original</option>
-        </select>
-      </div>
-      <div class="control">
         <label for="display-select">Geometry</label>
         <select id="display-select">
           <option value="bricks"{display_selected["bricks"]}>Full bricks</option>
@@ -889,9 +861,9 @@ def _build_html(
   <script>
     const legoStates = {state_json};
     const baseLayout = {layout_json};
+    const preferredLeftStructure = {preferred_left_structure};
     const plotEl = document.getElementById("lego-plot");
     const sampleSelect = document.getElementById("sample-select");
-    const structureSelect = document.getElementById("structure-select");
     const displaySelect = document.getElementById("display-select");
     const targetSelect = document.getElementById("target-select");
     const projectionSelect = document.getElementById("projection-select");
@@ -901,6 +873,8 @@ def _build_html(
     const blockOpacity = document.getElementById("block-opacity");
     const blockOpacityValue = document.getElementById("block-opacity-value");
     const metaEl = document.getElementById("sample-meta");
+    let lastRenderedSampleIndex = null;
+    let syncingCamera = false;
 
     function deepClone(value) {{
       return JSON.parse(JSON.stringify(value));
@@ -910,14 +884,46 @@ def _build_html(
       return value === "surface" ? "filled" : value;
     }}
 
-    function resolveStructure(state) {{
-      if (structureSelect.value === "original" && !state.meta.has_original) {{
-        structureSelect.value = "sampled";
+    function mergeInto(target, source) {{
+      Object.keys(source || {{}}).forEach((key) => {{
+        const value = source[key];
+        if (value && typeof value === "object" && !Array.isArray(value)) {{
+          const base = target[key];
+          target[key] = mergeInto(base && typeof base === "object" && !Array.isArray(base) ? deepClone(base) : {{}}, value);
+        }} else {{
+          target[key] = value;
+        }}
+      }});
+      return target;
+    }}
+
+    function resolveStructurePair(state) {{
+      if (!state.meta.has_original) {{
+        return {{
+          leftKey: "sampled",
+          rightKey: "sampled",
+          leftLabel: "Sampled",
+          rightLabel: "Sampled",
+        }};
       }}
-      return structureSelect.value;
+      if (preferredLeftStructure === "original") {{
+        return {{
+          leftKey: "original",
+          rightKey: "sampled",
+          leftLabel: "Original",
+          rightLabel: "Sampled",
+        }};
+      }}
+      return {{
+        leftKey: "sampled",
+        rightKey: "original",
+        leftLabel: "Sampled",
+        rightLabel: "Original",
+      }};
     }}
 
     function buildMeta(state, sampleIndex) {{
+      const pair = resolveStructurePair(state);
       const bits = [
         `Sample ${{sampleIndex}}`,
         `${{state.meta.num_bricks}} bricks`,
@@ -945,8 +951,8 @@ def _build_html(
         }}
       }}
       const structureLabel = state.meta.has_original
-        ? "Use Structure = Sampled / Original to compare the generated assembly against its conditioning reference."
-        : "This dataset has a single structure per sample.";
+        ? `${{pair.leftLabel}} on the left and ${{pair.rightLabel.toLowerCase()}} on the right share the same camera orientation.`
+        : "Both views show the same sampled assembly because this dataset has no original/reference structure.";
       metaEl.innerHTML = `
         <strong>${{bits.join(" · ")}}</strong>
         <div class="note">
@@ -955,19 +961,6 @@ def _build_html(
           ${{structureLabel}}
         </div>
       `;
-    }}
-
-    function currentTraces(state) {{
-      const structure = resolveStructure(state);
-      const display = displaySelect.value;
-      const targetMode = normalizeTargetMode(targetSelect.value);
-      let traces = [];
-      traces = traces.concat(applyStructureOpacity(deepClone(state.structures[structure][display])));
-      if (dipoleToggle.checked) {{
-        traces = traces.concat(buildDipoleTraces(state.structures[structure].dipole_specs));
-      }}
-      traces = traces.concat(deepClone(state.target[targetMode]));
-      return traces;
     }}
 
     function applyStructureOpacity(traces) {{
@@ -980,11 +973,46 @@ def _build_html(
       }});
     }}
 
-    function buildDipoleTraces(specs) {{
+    function sceneifyTrace(trace, sceneKey, showLegend, fallbackGroup, fallbackUid) {{
+      trace.scene = sceneKey;
+      trace.showlegend = Boolean(showLegend) && trace.showlegend !== false;
+      trace.legendgroup = trace.legendgroup || fallbackGroup;
+      trace.uid = `${{trace.uid || fallbackUid}}-${{sceneKey}}`;
+      return trace;
+    }}
+
+    function structureTracesForScene(state, structureKey, display, sceneKey, showLegend) {{
+      const traces = applyStructureOpacity(deepClone(state.structures[structureKey][display]));
+      return traces.map((trace, index) =>
+        sceneifyTrace(
+          trace,
+          sceneKey,
+          showLegend,
+          trace.legendgroup || `brick-pair-${{structureKey}}-${{index}}`,
+          trace.uid || `${{structureKey}}-${{display}}-${{index}}`
+        )
+      );
+    }}
+
+    function targetTracesForScene(state, targetMode, sceneKey, showLegend) {{
+      const traces = deepClone(state.target[targetMode] || []);
+      const legendGroup = `target-${{targetMode}}`;
+      return traces.map((trace, index) =>
+        sceneifyTrace(
+          trace,
+          sceneKey,
+          showLegend && index === 0,
+          legendGroup,
+          `target-${{targetMode}}-${{index}}`
+        )
+      );
+    }}
+
+    function buildDipoleTraces(specs, sceneKey) {{
       const lengthScale = Number(dipoleLength.value);
       const coneRef = Math.max(0.12, 0.55 * Math.max(0.12, 0.28 * lengthScale));
       const traces = [];
-      specs.forEach((spec) => {{
+      specs.forEach((spec, specIndex) => {{
         const lineX = [];
         const lineY = [];
         const lineZ = [];
@@ -1023,11 +1051,13 @@ def _build_html(
           x: lineX,
           y: lineY,
           z: lineZ,
+          scene: sceneKey,
           mode: "lines",
           line: {{ width: 7, color: spec.color }},
           name: spec.name,
           showlegend: false,
-          hoverinfo: "skip"
+          hoverinfo: "skip",
+          uid: `dipole-line-${{sceneKey}}-${{specIndex}}`
         }});
         traces.push({{
           type: "cone",
@@ -1037,6 +1067,7 @@ def _build_html(
           u: coneU,
           v: coneV,
           w: coneW,
+          scene: sceneKey,
           anchor: "tip",
           showscale: false,
           showlegend: false,
@@ -1046,22 +1077,144 @@ def _build_html(
           cmax: 1.0,
           sizemode: "absolute",
           sizeref: coneRef,
-          name: spec.name
+          name: spec.name,
+          uid: `dipole-cone-${{sceneKey}}-${{specIndex}}`
         }});
       }});
       return traces;
     }}
 
+    function currentTraces(state) {{
+      const pair = resolveStructurePair(state);
+      const display = displaySelect.value;
+      const targetMode = normalizeTargetMode(targetSelect.value);
+      let traces = [];
+      traces = traces.concat(structureTracesForScene(state, pair.leftKey, display, "scene", true));
+      traces = traces.concat(structureTracesForScene(state, pair.rightKey, display, "scene2", false));
+      if (dipoleToggle.checked) {{
+        traces = traces.concat(buildDipoleTraces(state.structures[pair.leftKey].dipole_specs, "scene"));
+        traces = traces.concat(buildDipoleTraces(state.structures[pair.rightKey].dipole_specs, "scene2"));
+      }}
+      traces = traces.concat(targetTracesForScene(state, targetMode, "scene", true));
+      traces = traces.concat(targetTracesForScene(state, targetMode, "scene2", false));
+      return traces;
+    }}
+
+    function cameraWithProjection(camera) {{
+      const result = deepClone(camera || {{}});
+      result.projection = {{ type: projectionSelect.value }};
+      return result;
+    }}
+
+    function getSceneCamera(sceneKey) {{
+      const fullScene = plotEl._fullLayout && plotEl._fullLayout[sceneKey];
+      if (fullScene && fullScene.camera) {{
+        return deepClone(fullScene.camera);
+      }}
+      const layoutScene = plotEl.layout && plotEl.layout[sceneKey];
+      if (layoutScene && layoutScene.camera) {{
+        return deepClone(layoutScene.camera);
+      }}
+      return null;
+    }}
+
     function currentLayout(state, sampleIndex) {{
+      const pair = resolveStructurePair(state);
       const layout = deepClone(baseLayout);
-      layout.scene = Object.assign({{}}, layout.scene || {{}}, deepClone(state.scene));
-      layout.scene.camera = layout.scene.camera || {{}};
-      layout.scene.camera.projection = {{ type: projectionSelect.value }};
+      const sceneBase = mergeInto(deepClone(layout.scene || {{}}), deepClone(state.scene));
+      const scene2Base = mergeInto(deepClone(layout.scene2 || {{}}), deepClone(state.scene));
+      sceneBase.domain = {{ x: [0.0, 0.48], y: [0.0, 1.0] }};
+      scene2Base.domain = {{ x: [0.52, 1.0], y: [0.0, 1.0] }};
+      sceneBase.camera = cameraWithProjection(sceneBase.camera || {{}});
+      scene2Base.camera = cameraWithProjection(scene2Base.camera || sceneBase.camera || {{}});
+
+      if (lastRenderedSampleIndex === sampleIndex) {{
+        const currentLeftCamera = getSceneCamera("scene");
+        const currentRightCamera = getSceneCamera("scene2");
+        if (currentLeftCamera) {{
+          sceneBase.camera = cameraWithProjection(currentLeftCamera);
+        }}
+        if (currentRightCamera) {{
+          scene2Base.camera = cameraWithProjection(currentRightCamera);
+        }} else if (currentLeftCamera) {{
+          scene2Base.camera = cameraWithProjection(currentLeftCamera);
+        }}
+      }}
+
+      layout.scene = sceneBase;
+      layout.scene2 = scene2Base;
       layout.scene.uirevision = `scene-${{sampleIndex}}-${{projectionSelect.value}}`;
+      layout.scene2.uirevision = `scene2-${{sampleIndex}}-${{projectionSelect.value}}`;
       layout.legend = layout.legend || {{}};
-      layout.legend.uirevision = `legend-${{sampleIndex}}-${{structureSelect.value}}-${{displaySelect.value}}`;
+      layout.legend.uirevision = `legend-${{sampleIndex}}`;
       layout.uirevision = `sample-${{sampleIndex}}`;
+      layout.annotations = [
+        {{
+          text: pair.leftLabel,
+          x: 0.24,
+          y: 1.02,
+          xref: "paper",
+          yref: "paper",
+          xanchor: "center",
+          yanchor: "bottom",
+          showarrow: false,
+          font: {{ size: 14, color: "#1d2329" }},
+        }},
+        {{
+          text: pair.rightLabel,
+          x: 0.76,
+          y: 1.02,
+          xref: "paper",
+          yref: "paper",
+          xanchor: "center",
+          yanchor: "bottom",
+          showarrow: false,
+          font: {{ size: 14, color: "#1d2329" }},
+        }},
+      ];
       return layout;
+    }}
+
+    function extractCameraPatch(eventData, sceneKey) {{
+      if (eventData[`${{sceneKey}}.camera`]) {{
+        return deepClone(eventData[`${{sceneKey}}.camera`]);
+      }}
+      if (eventData[sceneKey] && eventData[sceneKey].camera) {{
+        return deepClone(eventData[sceneKey].camera);
+      }}
+      const prefix = `${{sceneKey}}.camera.`;
+      const patch = {{}};
+      let found = false;
+      Object.entries(eventData).forEach(([key, value]) => {{
+        if (!key.startsWith(prefix)) {{
+          return;
+        }}
+        found = true;
+        const path = key.slice(prefix.length).split(".");
+        let cursor = patch;
+        for (let idx = 0; idx < path.length - 1; idx += 1) {{
+          const part = path[idx];
+          cursor[part] = cursor[part] || {{}};
+          cursor = cursor[part];
+        }}
+        cursor[path[path.length - 1]] = value;
+      }});
+      return found ? patch : null;
+    }}
+
+    function syncCamera(targetSceneKey, cameraPatch) {{
+      if (!cameraPatch) {{
+        return;
+      }}
+      const currentCamera = getSceneCamera(targetSceneKey) || {{}};
+      const nextCamera = mergeInto(deepClone(currentCamera), cameraPatch);
+      nextCamera.projection = {{ type: projectionSelect.value }};
+      syncingCamera = true;
+      Plotly.relayout(plotEl, {{
+        [`${{targetSceneKey}}.camera`]: nextCamera,
+      }}).finally(() => {{
+        syncingCamera = false;
+      }});
     }}
 
     function render() {{
@@ -1070,12 +1223,50 @@ def _build_html(
       const traces = currentTraces(state);
       const layout = currentLayout(state, sampleIndex);
       Plotly.react(plotEl, traces, layout, {{ responsive: true, displaylogo: false }});
+      lastRenderedSampleIndex = sampleIndex;
       dipoleLengthValue.textContent = Number(dipoleLength.value).toFixed(2);
       blockOpacityValue.textContent = Number(blockOpacity.value).toFixed(2);
       buildMeta(state, sampleIndex);
     }}
 
-    [sampleSelect, structureSelect, displaySelect, targetSelect, projectionSelect, dipoleToggle].forEach((element) => {{
+    plotEl.on("plotly_relayout", (eventData) => {{
+      if (syncingCamera) {{
+        return;
+      }}
+      const leftCameraPatch = extractCameraPatch(eventData, "scene");
+      const rightCameraPatch = extractCameraPatch(eventData, "scene2");
+      if (leftCameraPatch && !rightCameraPatch) {{
+        syncCamera("scene2", leftCameraPatch);
+      }} else if (rightCameraPatch && !leftCameraPatch) {{
+        syncCamera("scene", rightCameraPatch);
+      }}
+    }});
+
+    plotEl.on("plotly_legendclick", (eventData) => {{
+      const clickedTrace = plotEl.data[eventData.curveNumber];
+      if (!clickedTrace) {{
+        return false;
+      }}
+      const legendGroup = clickedTrace.legendgroup || clickedTrace.uid || `trace-${{eventData.curveNumber}}`;
+      const traceIndices = [];
+      plotEl.data.forEach((trace, traceIndex) => {{
+        const candidateGroup = trace.legendgroup || trace.uid || `trace-${{traceIndex}}`;
+        if (candidateGroup === legendGroup) {{
+          traceIndices.push(traceIndex);
+        }}
+      }});
+      if (traceIndices.length === 0) {{
+        return false;
+      }}
+      const anyVisible = traceIndices.some((traceIndex) => {{
+        const visibility = plotEl.data[traceIndex].visible;
+        return visibility === undefined || visibility === true;
+      }});
+      Plotly.restyle(plotEl, {{ visible: anyVisible ? "legendonly" : true }}, traceIndices);
+      return false;
+    }});
+
+    [sampleSelect, displaySelect, targetSelect, projectionSelect, dipoleToggle].forEach((element) => {{
       element.addEventListener("change", render);
     }});
     dipoleLength.addEventListener("input", render);
