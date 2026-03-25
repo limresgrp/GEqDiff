@@ -20,6 +20,7 @@ from geqdiff.utils.dipole_utils import (
     normalize_dipole_directions,
     split_shape_irreps,
 )
+from lego.score_utils import evaluate_sample_scores
 from lego.utils import load_samples
 
 
@@ -240,6 +241,7 @@ def main() -> None:
         record: Dict[str, Any] = {
             "sample_index": int(sample_index),
             "sampled": sampled_eval,
+            "score_card": evaluate_sample_scores(sample, dipole_config=config),
         }
         compare = None
         if "original_brick_anchors" in sample:
@@ -287,6 +289,10 @@ def main() -> None:
         for record in records
         if "descriptor_compare" in record and np.isfinite(record["descriptor_compare"]["dipole_direction_angle_deg"])
     ]
+    validity_scores = [float(record["score_card"]["sampled"]["scores"]["validity"]) for record in records if "score_card" in record]
+    compactness_scores = [float(record["score_card"]["sampled"]["scores"]["compactness"]) for record in records if "score_card" in record]
+    shellness_scores = [float(record["score_card"]["sampled"]["scores"]["shellness"]) for record in records if "score_card" in record]
+    dipole_scores = [float(record["score_card"]["sampled"]["scores"]["dipoles"]) for record in records if "score_card" in record]
 
     summary = {
         "num_samples": int(len(records)),
@@ -296,6 +302,10 @@ def main() -> None:
         "mean_energy_delta": _mean(energy_deltas),
         "mean_shape_mse": _mean(shape_mses),
         "mean_dipole_direction_angle_deg": _mean(dipole_angles),
+        "mean_validity_score": _mean(validity_scores),
+        "mean_compactness_score": _mean(compactness_scores),
+        "mean_shellness_score": _mean(shellness_scores),
+        "mean_dipole_score": _mean(dipole_scores),
         "failure_counts": failure_counts,
     }
 
@@ -304,6 +314,13 @@ def main() -> None:
     print(f"Samples: {summary['num_samples']}")
     print(f"Valid geometries: {summary['valid_geometries']}/{summary['num_samples']}")
     print(f"Mean sampled energy: {summary['mean_sampled_energy']:.3f}")
+    print(
+        "Mean validity / compactness / shellness / dipole scores: "
+        f"{summary['mean_validity_score']:.2f} / "
+        f"{summary['mean_compactness_score']:.2f} / "
+        f"{summary['mean_shellness_score']:.2f} / "
+        f"{summary['mean_dipole_score']:.2f}"
+    )
     if diffused_means:
         print(f"Mean diffused-anchor shift: {summary['mean_diffused_shift']:.3f}")
     if energy_deltas:

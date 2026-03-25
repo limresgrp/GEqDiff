@@ -26,7 +26,7 @@ from geqdiff.utils.dipole_utils import (
 )
 from geqdiff.utils.feature_utils import invert_scalar_normalization
 from geqtrain.train.components.checkpointing import CheckpointHandler
-from lego.utils import load_samples, save_samples
+from lego.utils import decode_brick_signatures, load_samples, save_samples
 
 
 STATE_FIELD_SPECS = (
@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="Number of reverse integration steps. Lower values are faster but coarser.",
+    )
+    parser.add_argument(
+        "--save-intermediates",
+        action="store_true",
+        help="Save the full sampled trajectory for each example, including the initial noisy state and all reverse steps.",
     )
     return parser.parse_args()
 
@@ -315,6 +320,69 @@ def _project_dipole_direction(values: torch.Tensor) -> torch.Tensor:
     return values / torch.clamp(norm, min=1e-8)
 
 
+def _decode_sampled_structure(
+    state: Dict[str, torch.Tensor],
+    example: Dict[str, np.ndarray],
+    scalar_normalization: Dict[str, Dict[str, np.ndarray]],
+) -> Dict[str, np.ndarray]:
+    sampled_pos = (state["pos"] + state["centroid"]).detach().cpu().numpy().astype(np.float32)
+    sampled_shape_scalar_model = state["shape_scalar_features"].detach().cpu().numpy().astype(np.float32)
+    sampled_dipole_strength_model = state["dipole_strength"].detach().cpu().numpy().astype(np.float32)
+    sampled_shape_equiv = _project_shape_equiv(state["shape_equiv_features"]).detach().cpu().numpy().astype(np.float32)
+    sampled_dipole_direction = _project_dipole_direction(state["dipole_direction"]).detach().cpu().numpy().astype(np.float32)
+
+    sampled_shape_scalar = (
+        invert_scalar_normalization(sampled_shape_scalar_model, scalar_normalization["shape_scalar_features"]).astype(np.float32)
+        if "shape_scalar_features" in scalar_normalization
+        else sampled_shape_scalar_model
+    )
+    sampled_dipole_strength = (
+        invert_scalar_normalization(sampled_dipole_strength_model, scalar_normalization["dipole_strength"]).astype(np.float32)
+        if "dipole_strength" in scalar_normalization
+        else sampled_dipole_strength_model
+    )
+    sampled_dipole_strength = np.clip(sampled_dipole_strength, 0.0, None).astype(np.float32)
+    sampled_dipole_direction = normalize_dipole_directions(sampled_dipole_direction).astype(np.float32)
+
+    sampled_shape = combine_shape_irreps(sampled_shape_scalar, sampled_shape_equiv).astype(np.float32)
+    sampled_dipoles = (sampled_dipole_direction * sampled_dipole_strength).astype(np.float32)
+    decoded_library = decode_brick_signatures(sampled_shape)
+    brick_types = np.asarray(example["types"]).astype(str).copy()
+    brick_rotations = np.asarray(example["rotations"], dtype=np.float32).copy()
+    ligand_mask = np.asarray(example["ligand_mask"], dtype=bool).reshape(-1)
+    brick_types[ligand_mask] = np.asarray(decoded_library["brick_types"])[ligand_mask]
+    brick_rotations[ligand_mask] = np.asarray(decoded_library["rotations"], dtype=np.float32)[ligand_mask]
+    return {
+        "brick_anchors": sampled_pos,
+        "brick_types": brick_types,
+        "brick_rotations": brick_rotations,
+        "brick_features": sampled_shape,
+        "brick_dipoles": sampled_dipoles,
+        "brick_dipole_strengths": sampled_dipole_strength,
+        "brick_dipole_directions": sampled_dipole_direction,
+        "decoded_library_index": np.asarray(decoded_library["indices"], dtype=np.int64),
+        "decoded_library_distance": np.asarray(decoded_library["distances"], dtype=np.float32),
+    }
+
+
+def _trajectory_snapshot(
+    state: Dict[str, torch.Tensor],
+    example: Dict[str, np.ndarray],
+    scalar_normalization: Dict[str, Dict[str, np.ndarray]],
+    *,
+    stage_index: int,
+    stage_label: str,
+    scheduler_step: int,
+    tau: float,
+) -> Dict[str, np.ndarray]:
+    snapshot = _decode_sampled_structure(state, example, scalar_normalization)
+    snapshot["stage_index"] = np.asarray(stage_index, dtype=np.int64)
+    snapshot["stage_label"] = np.asarray(stage_label)
+    snapshot["scheduler_step"] = np.asarray(scheduler_step, dtype=np.int64)
+    snapshot["tau"] = np.asarray(tau, dtype=np.float32)
+    return snapshot
+
+
 def initial_masked_state(
     example: Dict[str, np.ndarray],
     generator: torch.Generator,
@@ -418,6 +486,7 @@ def sample_example(
     position_noise_center_mask_field: str,
     project_normalized_states: bool,
     corrupt_field_map: Dict[str, str],
+    save_intermediates: bool,
 ) -> Dict[str, np.ndarray]:
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
@@ -442,6 +511,21 @@ def sample_example(
         raise ValueError("--steps must be >= 1.")
     start_step = sampler.T - 1
     time_steps = np.linspace(0, start_step, num=steps, dtype=int)[::-1].copy()
+    trajectory: List[Dict[str, np.ndarray]] = []
+
+    if save_intermediates:
+        initial_t = int(time_steps[0])
+        trajectory.append(
+            _trajectory_snapshot(
+                state,
+                example,
+                scalar_normalization,
+                stage_index=0,
+                stage_label="noise",
+                scheduler_step=initial_t,
+                tau=float(sampler.scheduler.tau[initial_t].item()),
+            )
+        )
 
     for step_idx, t in enumerate(time_steps):
         t_prev = int(time_steps[step_idx + 1]) if step_idx < len(time_steps) - 1 else -1
@@ -488,28 +572,28 @@ def sample_example(
         state["shape_equiv_features"] = torch.where(ligand_mask_column, next_states["shape_equiv_features"], state["shape_equiv_fixed"])
         state["dipole_strength"] = torch.where(ligand_mask_column, next_states["dipole_strength"], state["dipole_strength_fixed"])
         state["dipole_direction"] = torch.where(ligand_mask_column, next_states["dipole_direction"], state["dipole_direction_fixed"])
+        if save_intermediates:
+            if t_prev >= 0:
+                stage_label = f"step {step_idx + 1}/{len(time_steps)}"
+                tau_value = float(sampler.scheduler.tau[t_prev].item())
+                scheduler_step = int(t_prev)
+            else:
+                stage_label = "final"
+                tau_value = 0.0
+                scheduler_step = -1
+            trajectory.append(
+                _trajectory_snapshot(
+                    state,
+                    example,
+                    scalar_normalization,
+                    stage_index=step_idx + 1,
+                    stage_label=stage_label,
+                    scheduler_step=scheduler_step,
+                    tau=tau_value,
+                )
+            )
 
-    sampled_pos = (state["pos"] + state["centroid"]).detach().cpu().numpy().astype(np.float32)
-    sampled_shape_scalar_model = state["shape_scalar_features"].detach().cpu().numpy().astype(np.float32)
-    sampled_dipole_strength_model = state["dipole_strength"].detach().cpu().numpy().astype(np.float32)
-    sampled_shape_equiv = _project_shape_equiv(state["shape_equiv_features"]).detach().cpu().numpy().astype(np.float32)
-    sampled_dipole_direction = _project_dipole_direction(state["dipole_direction"]).detach().cpu().numpy().astype(np.float32)
-
-    sampled_shape_scalar = (
-        invert_scalar_normalization(sampled_shape_scalar_model, scalar_normalization["shape_scalar_features"]).astype(np.float32)
-        if "shape_scalar_features" in scalar_normalization
-        else sampled_shape_scalar_model
-    )
-    sampled_dipole_strength = (
-        invert_scalar_normalization(sampled_dipole_strength_model, scalar_normalization["dipole_strength"]).astype(np.float32)
-        if "dipole_strength" in scalar_normalization
-        else sampled_dipole_strength_model
-    )
-    sampled_dipole_strength = np.clip(sampled_dipole_strength, 0.0, None).astype(np.float32)
-    sampled_dipole_direction = normalize_dipole_directions(sampled_dipole_direction).astype(np.float32)
-
-    sampled_shape = combine_shape_irreps(sampled_shape_scalar, sampled_shape_equiv).astype(np.float32)
-    sampled_dipoles = (sampled_dipole_direction * sampled_dipole_strength).astype(np.float32)
+    decoded_sample = _decode_sampled_structure(state, example, scalar_normalization)
 
     original_shape = np.asarray(
         example.get("shape_features_raw", combine_shape_irreps(example["shape_scalar_features"], example["shape_equiv_features"])),
@@ -527,14 +611,8 @@ def sample_example(
         np.asarray(example.get("dipole_direction_raw", example["dipole_direction"]), dtype=np.float32)
     ).astype(np.float32)
 
-    return {
-        "brick_anchors": sampled_pos,
-        "brick_types": np.asarray(example["types"]).astype(str),
-        "brick_rotations": np.asarray(example["rotations"], dtype=np.float32),
-        "brick_features": sampled_shape,
-        "brick_dipoles": sampled_dipoles,
-        "brick_dipole_strengths": sampled_dipole_strength,
-        "brick_dipole_directions": sampled_dipole_direction,
+    sample = {
+        **decoded_sample,
         "original_brick_anchors": np.asarray(example["pos"], dtype=np.float32),
         "original_brick_types": np.asarray(example["types"]).astype(str),
         "original_brick_rotations": np.asarray(example["rotations"], dtype=np.float32),
@@ -548,6 +626,9 @@ def sample_example(
         "source_frame_id": np.asarray(example["source_frame_id"], dtype=np.int64),
         "split_id": np.asarray(example["split_id"], dtype=np.int64),
     }
+    if save_intermediates:
+        sample["intermediate_states"] = np.asarray(trajectory, dtype=object)
+    return sample
 
 
 def enrich_from_canonical_source(
@@ -629,6 +710,7 @@ def main(args: argparse.Namespace | None = None) -> None:
             position_noise_center_mask_field=position_noise_center_mask_field,
             project_normalized_states=project_normalized_states,
             corrupt_field_map=corrupt_field_map,
+            save_intermediates=bool(args.save_intermediates),
         )
         sample["conditioning_example_index"] = np.asarray(example_index, dtype=np.int64)
         samples.append(enrich_from_canonical_source(sample, source_samples=source_samples))

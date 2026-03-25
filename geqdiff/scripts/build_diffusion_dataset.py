@@ -29,6 +29,10 @@ from geqdiff.utils.feature_utils import (
 from lego.utils import default_dataset_path, load_samples
 
 
+LIGAND_UNKNOWN_TYPE_NAME = "ligand_unknown"
+DIRECTION_VALID_EPS = 1e-6
+
+
 def _adjacency_from_contact_pairs(num_nodes: int, contact_pairs: np.ndarray) -> List[List[int]]:
     adjacency = [[] for _ in range(num_nodes)]
     for src, dst in np.asarray(contact_pairs, dtype=np.int64):
@@ -169,6 +173,31 @@ def _extract_or_assign_dipoles(
     return dipoles.astype(np.float32)
 
 
+def _directional_target_metadata(
+    shape_scalar_features: np.ndarray,
+    dipole_strength: np.ndarray,
+    eps: float = DIRECTION_VALID_EPS,
+) -> Dict[str, np.ndarray]:
+    shape_scalar_features = np.asarray(shape_scalar_features, dtype=np.float32)
+    dipole_strength = np.asarray(dipole_strength, dtype=np.float32)
+
+    l1_weight = np.maximum(shape_scalar_features[:, 1], 0.0).astype(np.float32)
+    l2_weight = np.maximum(shape_scalar_features[:, 2], 0.0).astype(np.float32)
+    l3_weight = np.maximum(shape_scalar_features[:, 3], 0.0).astype(np.float32)
+    dipole_weight = np.maximum(dipole_strength.reshape(-1), 0.0).astype(np.float32)
+
+    return {
+        "shape_l1_weight": l1_weight,
+        "shape_l2_weight": l2_weight,
+        "shape_l3_weight": l3_weight,
+        "dipole_direction_weight": dipole_weight,
+        "shape_l1_valid": (l1_weight > float(eps)),
+        "shape_l2_valid": (l2_weight > float(eps)),
+        "shape_l3_valid": (l3_weight > float(eps)),
+        "dipole_direction_valid": (dipole_weight > float(eps)),
+    }
+
+
 def _validate_example(example: Dict, adjacency: Sequence[Sequence[int]], split_strategy: str) -> None:
     ligand_mask = np.asarray(example["ligand_mask"], dtype=bool)
     pocket_mask = np.asarray(example["pocket_mask"], dtype=bool)
@@ -176,6 +205,14 @@ def _validate_example(example: Dict, adjacency: Sequence[Sequence[int]], split_s
     shape_equiv_features = np.asarray(example["shape_equiv_features"], dtype=np.float32)
     dipole_strength = np.asarray(example["dipole_strength"], dtype=np.float32)
     dipole_direction = np.asarray(example["dipole_direction"], dtype=np.float32)
+    shape_l1_valid = np.asarray(example["shape_l1_valid"], dtype=bool)
+    shape_l2_valid = np.asarray(example["shape_l2_valid"], dtype=bool)
+    shape_l3_valid = np.asarray(example["shape_l3_valid"], dtype=bool)
+    dipole_direction_valid = np.asarray(example["dipole_direction_valid"], dtype=bool)
+    shape_l1_weight = np.asarray(example["shape_l1_weight"], dtype=np.float32)
+    shape_l2_weight = np.asarray(example["shape_l2_weight"], dtype=np.float32)
+    shape_l3_weight = np.asarray(example["shape_l3_weight"], dtype=np.float32)
+    dipole_direction_weight = np.asarray(example["dipole_direction_weight"], dtype=np.float32)
     edge_index = np.asarray(example["edge_index"], dtype=np.int64)
     num_nodes = int(example["num_nodes"])
 
@@ -186,7 +223,19 @@ def _validate_example(example: Dict, adjacency: Sequence[Sequence[int]], split_s
     assert shape_equiv_features.shape == (num_nodes, 15)
     assert dipole_strength.shape == (num_nodes, 1)
     assert dipole_direction.shape == (num_nodes, 3)
+    assert shape_l1_valid.shape == (num_nodes,)
+    assert shape_l2_valid.shape == (num_nodes,)
+    assert shape_l3_valid.shape == (num_nodes,)
+    assert dipole_direction_valid.shape == (num_nodes,)
+    assert shape_l1_weight.shape == (num_nodes,)
+    assert shape_l2_weight.shape == (num_nodes,)
+    assert shape_l3_weight.shape == (num_nodes,)
+    assert dipole_direction_weight.shape == (num_nodes,)
     assert np.all(dipole_strength >= -1e-6)
+    assert np.all(shape_l1_weight >= -1e-6)
+    assert np.all(shape_l2_weight >= -1e-6)
+    assert np.all(shape_l3_weight >= -1e-6)
+    assert np.all(dipole_direction_weight >= -1e-6)
     if split_strategy == "connected":
         assert _ligand_is_connected(ligand_mask, adjacency)
 
@@ -204,7 +253,7 @@ def _build_frame_record(sample: Dict, source_frame_id: int, type_vocab: Sequence
     pos = np.asarray(sample["brick_anchors"], dtype=np.float32)
     rotations = np.asarray(sample["brick_rotations"], dtype=np.float32)
     types = np.asarray(sample["brick_types"])
-    node_types = encode_type_names(types, type_vocab)
+    node_types_true = encode_type_names(types, type_vocab)
     shape_features = np.asarray(sample["brick_features"], dtype=np.float32)
     shape_scalar_features, shape_equiv_features = split_shape_irreps(shape_features)
 
@@ -227,6 +276,10 @@ def _build_frame_record(sample: Dict, source_frame_id: int, type_vocab: Sequence
     )
     dipole_direction = normalize_dipole_directions(dipoles)
     dipole_strength = dipole_strengths(dipoles)
+    directional_metadata = _directional_target_metadata(
+        shape_scalar_features=shape_scalar_features,
+        dipole_strength=dipole_strength,
+    )
 
     return {
         "source_frame_id": int(source_frame_id),
@@ -234,13 +287,15 @@ def _build_frame_record(sample: Dict, source_frame_id: int, type_vocab: Sequence
         "pos": pos,
         "rotations": rotations,
         "types": types,
-        "node_types": node_types,
+        "node_types_true": node_types_true,
+        "type_vocab": np.asarray(type_vocab),
         "shape_features_raw": shape_features,
         "shape_scalar_features": shape_scalar_features,
         "shape_equiv_features": shape_equiv_features,
         "brick_dipoles_raw": dipoles,
         "dipole_direction": dipole_direction,
         "dipole_strength": dipole_strength,
+        **directional_metadata,
         "edge_index": edge_index,
         "edge_types": edge_types,
         "contact_pairs": contact_pairs,
@@ -263,6 +318,8 @@ def _build_examples_for_frame(
     pos = np.asarray(frame["pos"], dtype=np.float32)
     num_nodes = int(frame["num_nodes"])
     adjacency = _adjacency_from_contact_pairs(num_nodes, frame["contact_pairs"])
+    type_vocab = np.asarray(frame["type_vocab"]).astype(str).tolist()
+    unknown_type_index = type_vocab.index(LIGAND_UNKNOWN_TYPE_NAME)
 
     examples: List[Dict] = []
     for split_id in range(splits_per_frame):
@@ -292,6 +349,8 @@ def _build_examples_for_frame(
 
         pocket_mask = ~ligand_mask
         ligand_centroid = pos[ligand_mask].mean(axis=0).astype(np.float32)
+        input_node_types = frame["node_types_true"].astype(np.int64).copy()
+        input_node_types[ligand_mask] = int(unknown_type_index)
 
         example = {
             "source_frame_id": np.int64(frame["source_frame_id"]),
@@ -302,13 +361,22 @@ def _build_examples_for_frame(
             "pos": frame["pos"].astype(np.float32),
             "rotations": frame["rotations"].astype(np.float32),
             "types": np.asarray(frame["types"]),
-            "node_types": frame["node_types"].astype(np.int64),
+            "node_types": input_node_types.astype(np.int64),
+            "node_types_true": frame["node_types_true"].astype(np.int64),
             "shape_features_raw": frame["shape_features_raw"].astype(np.float32),
             "shape_scalar_features": frame["shape_scalar_features"].astype(np.float32),
             "shape_equiv_features": frame["shape_equiv_features"].astype(np.float32),
             "brick_dipoles_raw": frame["brick_dipoles_raw"].astype(np.float32),
             "dipole_direction": frame["dipole_direction"].astype(np.float32),
             "dipole_strength": frame["dipole_strength"].astype(np.float32),
+            "shape_l1_valid": frame["shape_l1_valid"].astype(bool),
+            "shape_l2_valid": frame["shape_l2_valid"].astype(bool),
+            "shape_l3_valid": frame["shape_l3_valid"].astype(bool),
+            "dipole_direction_valid": frame["dipole_direction_valid"].astype(bool),
+            "shape_l1_weight": frame["shape_l1_weight"].astype(np.float32),
+            "shape_l2_weight": frame["shape_l2_weight"].astype(np.float32),
+            "shape_l3_weight": frame["shape_l3_weight"].astype(np.float32),
+            "dipole_direction_weight": frame["dipole_direction_weight"].astype(np.float32),
             "ligand_mask": ligand_mask.astype(bool),
             "pocket_mask": pocket_mask.astype(bool),
             "edge_index": frame["edge_index"].astype(np.int64),
@@ -342,6 +410,10 @@ def _normalize_scalar_fields(
             example[raw_field] = np.asarray(example[field], dtype=np.float32).copy()
 
     if not normalize_scalars:
+        shape_stats = {"means": np.zeros((4,), dtype=np.float32), "stds": np.ones((4,), dtype=np.float32)}
+        for example in examples:
+            example["shape_scalar_norm_means"] = np.asarray(shape_stats["means"], dtype=np.float32)
+            example["shape_scalar_norm_stds"] = np.asarray(shape_stats["stds"], dtype=np.float32)
         return metadata
 
     for field in ("shape_scalar_features", "dipole_strength"):
@@ -353,6 +425,11 @@ def _normalize_scalar_fields(
         metadata[field] = stats
         for example in examples:
             example[field] = apply_scalar_normalization(np.asarray(example[field], dtype=np.float32), stats).astype(np.float32)
+
+    shape_stats = metadata.get("shape_scalar_features", {"means": np.zeros((4,), dtype=np.float32), "stds": np.ones((4,), dtype=np.float32)})
+    for example in examples:
+        example["shape_scalar_norm_means"] = np.asarray(shape_stats["means"], dtype=np.float32)
+        example["shape_scalar_norm_stds"] = np.asarray(shape_stats["stds"], dtype=np.float32)
 
     return metadata
 
@@ -391,6 +468,7 @@ def _pack_examples(
     _pad_node_field(payload, "rotations", examples, max_nodes, np.float32, tail_shape=(3, 3))
     _pad_node_field(payload, "types", examples, max_nodes, f"<U{max_type_len}")
     _pad_node_field(payload, "node_types", examples, max_nodes, np.int64)
+    _pad_node_field(payload, "node_types_true", examples, max_nodes, np.int64)
     _pad_node_field(payload, "shape_features_raw", examples, max_nodes, np.float32, tail_shape=(16,))
     _pad_node_field(payload, "shape_scalar_features", examples, max_nodes, np.float32, tail_shape=(4,))
     _pad_node_field(payload, "shape_scalar_features_raw", examples, max_nodes, np.float32, tail_shape=(4,))
@@ -401,6 +479,14 @@ def _pack_examples(
     _pad_node_field(payload, "dipole_strength_raw", examples, max_nodes, np.float32, tail_shape=(1,))
     _pad_node_field(payload, "dipole_direction", examples, max_nodes, np.float32, tail_shape=(3,))
     _pad_node_field(payload, "dipole_direction_raw", examples, max_nodes, np.float32, tail_shape=(3,))
+    _pad_node_field(payload, "shape_l1_valid", examples, max_nodes, bool)
+    _pad_node_field(payload, "shape_l2_valid", examples, max_nodes, bool)
+    _pad_node_field(payload, "shape_l3_valid", examples, max_nodes, bool)
+    _pad_node_field(payload, "dipole_direction_valid", examples, max_nodes, bool)
+    _pad_node_field(payload, "shape_l1_weight", examples, max_nodes, np.float32)
+    _pad_node_field(payload, "shape_l2_weight", examples, max_nodes, np.float32)
+    _pad_node_field(payload, "shape_l3_weight", examples, max_nodes, np.float32)
+    _pad_node_field(payload, "dipole_direction_weight", examples, max_nodes, np.float32)
     _pad_node_field(payload, "ligand_mask", examples, max_nodes, bool)
     _pad_node_field(payload, "pocket_mask", examples, max_nodes, bool)
     _pad_node_field(payload, "component_id", examples, max_nodes, np.int32)
@@ -428,9 +514,11 @@ def _pack_examples(
         payload[field] = np.asarray([example[field] for example in examples], dtype=np.int64)
     for field in ["frame_centroid", "ligand_centroid"]:
         payload[field] = np.asarray([example[field] for example in examples], dtype=np.float32)
+    for field in ["shape_scalar_norm_means", "shape_scalar_norm_stds"]:
+        payload[field] = np.asarray([example[field] for example in examples], dtype=np.float32)
 
     payload["type_vocab"] = np.asarray(type_vocab, dtype=f"<U{max_type_len}")
-    payload["schema_version"] = np.asarray([2], dtype=np.int32)
+    payload["schema_version"] = np.asarray([4], dtype=np.int32)
     payload["irreps"] = np.asarray(str(irreps_string()))
     payload["split_strategy"] = np.asarray(str(split_strategy))
     payload["scalar_normalization_enabled"] = np.asarray([1 if len(scalar_normalization) > 0 else 0], dtype=np.int32)
@@ -465,6 +553,40 @@ def _print_stats(examples: Sequence[Dict]) -> None:
         for example in examples
         for node_index in range(int(example["num_nodes"]))
     )
+    valid_stats = {
+        "dipole_direction_valid": float(
+            np.mean(
+                [
+                    np.asarray(example["dipole_direction_valid"], dtype=np.float32)[: int(example["num_nodes"])].mean()
+                    for example in examples
+                ]
+            )
+        ),
+        "shape_l1_valid": float(
+            np.mean(
+                [
+                    np.asarray(example["shape_l1_valid"], dtype=np.float32)[: int(example["num_nodes"])].mean()
+                    for example in examples
+                ]
+            )
+        ),
+        "shape_l2_valid": float(
+            np.mean(
+                [
+                    np.asarray(example["shape_l2_valid"], dtype=np.float32)[: int(example["num_nodes"])].mean()
+                    for example in examples
+                ]
+            )
+        ),
+        "shape_l3_valid": float(
+            np.mean(
+                [
+                    np.asarray(example["shape_l3_valid"], dtype=np.float32)[: int(example["num_nodes"])].mean()
+                    for example in examples
+                ]
+            )
+        ),
+    }
 
     print("--- LEGO Diffusion Dataset ---")
     print(f"Examples: {num_examples}")
@@ -474,6 +596,11 @@ def _print_stats(examples: Sequence[Dict]) -> None:
     print("Dipole state histogram:")
     print(f"  neutral: {polar_hist.get(0, 0)}")
     print(f"  polar: {polar_hist.get(1, 0)}")
+    print("Directional validity fractions:")
+    print(f"  dipole: {valid_stats['dipole_direction_valid']:.3f}")
+    print(f"  shape l1: {valid_stats['shape_l1_valid']:.3f}")
+    print(f"  shape l2: {valid_stats['shape_l2_valid']:.3f}")
+    print(f"  shape l3: {valid_stats['shape_l3_valid']:.3f}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -508,6 +635,8 @@ def main() -> None:
 
     samples = load_samples(args.input)
     type_vocab = build_type_vocab(samples)
+    if LIGAND_UNKNOWN_TYPE_NAME not in type_vocab:
+        type_vocab = list(type_vocab) + [LIGAND_UNKNOWN_TYPE_NAME]
 
     frames = [
         _build_frame_record(

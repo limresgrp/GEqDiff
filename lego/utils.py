@@ -1,5 +1,6 @@
 """Shared spherical-harmonic geometry and dataset helpers for LEGO blocks."""
 
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -7,9 +8,9 @@ import torch
 from e3nn import o3
 
 try:
-    from lego.lego_blocks import LEGO_LIBRARY, NEIGHBOR_DIRS, get_exposed_faces, rotated_offsets
+    from lego.lego_blocks import LEGO_LIBRARY, NEIGHBOR_DIRS, get_exposed_faces, iter_rotated_offsets, rotated_offsets
 except ModuleNotFoundError:
-    from lego_blocks import LEGO_LIBRARY, NEIGHBOR_DIRS, get_exposed_faces, rotated_offsets
+    from lego_blocks import LEGO_LIBRARY, NEIGHBOR_DIRS, get_exposed_faces, iter_rotated_offsets, rotated_offsets
 
 
 DEFAULT_LMAX = 3
@@ -268,6 +269,43 @@ def block_signature(offsets, rotation=None, lmax=DEFAULT_LMAX):
     return irrep_signature(exposed_faces, lmax=lmax)
 
 
+@lru_cache(maxsize=4)
+def brick_signature_library(lmax=DEFAULT_LMAX):
+    signatures = []
+    brick_types = []
+    rotations = []
+    for brick_type, spec in LEGO_LIBRARY.items():
+        for rotation, _ in iter_rotated_offsets(spec["offsets"]):
+            signatures.append(block_signature(spec["offsets"], rotation=rotation, lmax=lmax))
+            brick_types.append(brick_type)
+            rotations.append(np.asarray(rotation, dtype=np.float32))
+
+    if len(signatures) == 0:
+        raise ValueError("LEGO library is empty.")
+
+    return {
+        "signatures": np.asarray(signatures, dtype=np.float32),
+        "brick_types": np.asarray(brick_types),
+        "rotations": np.asarray(rotations, dtype=np.float32),
+    }
+
+
+def decode_brick_signatures(signatures: np.ndarray, lmax=DEFAULT_LMAX):
+    query = np.asarray(signatures, dtype=np.float32)
+    if query.ndim != 2:
+        raise ValueError(f"Expected [N, F] signatures, got {query.shape}.")
+    library = brick_signature_library(lmax=lmax)
+    reference = np.asarray(library["signatures"], dtype=np.float32)
+    distances = np.linalg.norm(query[:, None, :] - reference[None, :, :], axis=-1)
+    nearest = distances.argmin(axis=1)
+    return {
+        "brick_types": np.asarray(library["brick_types"])[nearest],
+        "rotations": np.asarray(library["rotations"], dtype=np.float32)[nearest],
+        "distances": distances[np.arange(query.shape[0]), nearest].astype(np.float32),
+        "indices": nearest.astype(np.int64),
+    }
+
+
 def _normalize_sample(sample):
     sample = dict(sample)
 
@@ -334,6 +372,14 @@ def _normalize_sample(sample):
         sample["mesh_z"] = np.asarray(sample["mesh_z"], dtype=np.float32)
     if "sampled_brick_mask" in sample:
         sample["sampled_brick_mask"] = np.asarray(sample["sampled_brick_mask"], dtype=bool).reshape(-1)
+    if "stage_index" in sample:
+        sample["stage_index"] = np.asarray(sample["stage_index"], dtype=np.int64)
+    if "stage_label" in sample:
+        sample["stage_label"] = np.asarray(sample["stage_label"]).astype(str)
+    if "scheduler_step" in sample:
+        sample["scheduler_step"] = np.asarray(sample["scheduler_step"], dtype=np.int64)
+    if "tau" in sample:
+        sample["tau"] = np.asarray(sample["tau"], dtype=np.float32)
 
     if "original_brick_anchors" in sample or "original_pos" in sample:
         original_brick_anchors = sample.get("original_brick_anchors", sample.get("original_pos"))
@@ -378,6 +424,16 @@ def _normalize_sample(sample):
         sample["original_features"] = sample["original_brick_features"]
         sample["original_dipoles"] = sample["original_brick_dipoles"]
         sample["original_rotations"] = sample["original_brick_rotations"]
+
+    if "intermediate_states" in sample:
+        raw_intermediate_states = sample["intermediate_states"]
+        if isinstance(raw_intermediate_states, np.ndarray) and raw_intermediate_states.ndim == 0:
+            intermediate_entries = [raw_intermediate_states.item()]
+        elif isinstance(raw_intermediate_states, np.ndarray):
+            intermediate_entries = list(raw_intermediate_states.tolist())
+        else:
+            intermediate_entries = list(raw_intermediate_states)
+        sample["intermediate_states"] = [_normalize_sample(entry) for entry in intermediate_entries]
 
     return sample
 

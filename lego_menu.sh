@@ -351,24 +351,14 @@ inspect_diffusion_dataset() {
 train_lego_model() {
   local config_path dataset_path results_root device run_name
   config_path="$(prompt_with_default "Experiment config path" "${EXPERIMENT_CONFIG_PATH}")"
-  dataset_path="$(prompt_with_default "Diffusion dataset path" "${DIFFUSION_DATASET_PATH}")"
-  results_root="$(prompt_with_default "Results root directory" "${RESULTS_ROOT_PATH}")"
   device="$(prompt_with_default "Device" "cuda:0")"
-  run_name="$(prompt_with_default "Run name override (blank to use config default)" "")"
 
   collect_hydra_overrides
 
   local cmd=(env
     "PYTHONPATH=${GEQTRAIN_PYTHONPATH}"
-    "GEQDIFF_LEGO_DATA=${dataset_path}"
-    "GEQDIFF_LEGO_SHELL_DATA=${dataset_path}"
-    "GEQDIFF_LEGO_SHELL_SMALL_DATA=${dataset_path}"
-    "GEQDIFF_RESULTS=${results_root}"
     "${TRAIN_CMD[@]}" "${config_path}" -d "${device}"
   )
-  if [[ -n "${run_name}" ]]; then
-    cmd+=(-o "run_name=${run_name}")
-  fi
   local override
   for override in "${HYDRA_OVERRIDES[@]}"; do
     cmd+=(-o "${override}")
@@ -381,7 +371,7 @@ train_lego_model() {
 }
 
 sample_lego_blocks() {
-  local latest_model model_path input_path output_path source_path num_samples steps device seed indices_raw
+  local latest_model model_path input_path output_path source_path num_samples steps device seed indices_raw save_intermediates
   latest_model="$(latest_named_file "${RESULTS_ROOT_PATH}" "best_model.pth")"
   model_path="$(prompt_with_default "Checkpoint path" "${latest_model}")"
   input_path="$(prompt_with_default "Input diffusion dataset path" "${DIFFUSION_DATASET_PATH}")"
@@ -392,6 +382,11 @@ sample_lego_blocks() {
   device="$(prompt_with_default "Device" "cuda:0")"
   seed="$(prompt_with_default "Random seed" "0")"
   indices_raw="$(prompt_with_default "Explicit diffusion example indices (space-separated, blank for random)" "")"
+  if prompt_yes_no "Save all intermediate reverse states?" "y"; then
+    save_intermediates="y"
+  else
+    save_intermediates="n"
+  fi
 
   if ! confirm_overwrite "${output_path}"; then
     echo "Cancelled."
@@ -416,6 +411,9 @@ sample_lego_blocks() {
     local indices=()
     read -r -a indices <<< "${indices_raw}"
     cmd+=(--indices "${indices[@]}")
+  fi
+  if [[ "${save_intermediates}" == "y" ]]; then
+    cmd+=(--save-intermediates)
   fi
 
   if run_cmd "${cmd[@]}"; then

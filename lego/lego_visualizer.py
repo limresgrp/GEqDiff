@@ -14,9 +14,11 @@ from plotly.utils import PlotlyJSONEncoder
 
 try:
     from lego.lego_blocks import LEGO_LIBRARY, rotated_offsets
+    from lego.score_utils import evaluate_sample_scores
     from lego.utils import block_palette, build_surface_mesh, default_dataset_path, load_samples
 except ModuleNotFoundError:
     from lego_blocks import LEGO_LIBRARY, rotated_offsets
+    from score_utils import evaluate_sample_scores
     from utils import block_palette, build_surface_mesh, default_dataset_path, load_samples
 
 
@@ -37,6 +39,15 @@ MAX_DIPOLE_LENGTH = 2.2
 DEFAULT_BLOCK_OPACITY = 1.0
 MIN_BLOCK_OPACITY = 0.15
 MAX_BLOCK_OPACITY = 1.0
+SAMPLED_STRUCTURE_FIELDS = (
+    "brick_anchors",
+    "brick_types",
+    "brick_rotations",
+    "brick_features",
+    "brick_dipoles",
+    "brick_dipole_strengths",
+    "brick_dipole_directions",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -494,6 +505,17 @@ def _target_trace_sets(sample: Dict) -> Dict[str, List[go.BaseTraceType]]:
     return target
 
 
+def _sample_with_sampled_structure(sample: Dict, sampled_structure: Dict) -> Dict:
+    merged = dict(sample)
+    for key in SAMPLED_STRUCTURE_FIELDS:
+        if key in sampled_structure:
+            merged[key] = np.asarray(sampled_structure[key]).copy()
+    for key in ("stage_index", "stage_label", "scheduler_step", "tau"):
+        if key in sampled_structure:
+            merged[key] = np.asarray(sampled_structure[key]).copy()
+    return merged
+
+
 def _structure_traces(sample: Dict, prefix: str) -> Dict[str, List[go.BaseTraceType]]:
     anchors = np.asarray(sample[f"{prefix}brick_anchors"], dtype=np.float32)
     rotations = np.asarray(sample[f"{prefix}brick_rotations"], dtype=np.float32)
@@ -565,10 +587,15 @@ def _target_points(sample: Dict) -> np.ndarray:
 
 
 def _scene_spec(sample: Dict, projection: str) -> Dict:
+    trajectory_points: List[np.ndarray] = []
+    for intermediate in sample.get("intermediate_states", []):
+        stage_sample = _sample_with_sampled_structure(sample, intermediate)
+        trajectory_points.append(_structure_points(stage_sample, ""))
     points = np.concatenate(
         [
             _structure_points(sample, ""),
             _structure_points(sample, "original_"),
+            *trajectory_points,
             _target_points(sample),
         ],
         axis=0,
@@ -617,7 +644,35 @@ def _sample_meta(sample: Dict) -> Dict[str, int | bool | float | str]:
         meta["shell_thickness"] = float(np.asarray(sample["shell_thickness"]).reshape(-1)[0])
     if "shell_sparsity" in sample:
         meta["shell_sparsity"] = float(np.asarray(sample["shell_sparsity"]).reshape(-1)[0])
+    if "intermediate_states" in sample:
+        meta["num_intermediate_states"] = int(len(sample["intermediate_states"]))
     return meta
+
+
+def _trajectory_state_payloads(sample: Dict) -> List[Dict]:
+    raw_stages = list(sample.get("intermediate_states", []))
+    if len(raw_stages) == 0:
+        raw_stages = [sample]
+
+    payloads: List[Dict] = []
+    for stage_index, raw_stage in enumerate(raw_stages):
+        stage_sample = _sample_with_sampled_structure(sample, raw_stage)
+        stage_traces = _structure_traces(stage_sample, prefix="")
+        payloads.append(
+            {
+                "label": str(np.asarray(stage_sample.get("stage_label", "final")).reshape(-1)[0]),
+                "stage_index": int(np.asarray(stage_sample.get("stage_index", stage_index)).reshape(-1)[0]),
+                "scheduler_step": int(np.asarray(stage_sample.get("scheduler_step", -1)).reshape(-1)[0]),
+                "tau": float(np.asarray(stage_sample.get("tau", 0.0)).reshape(-1)[0]),
+                "structure": {
+                    "bricks": _serialize_traces(stage_traces["bricks"]),
+                    "surfaces": _serialize_traces(stage_traces["surfaces"]),
+                    "dipole_specs": stage_traces["dipole_specs"],
+                },
+                "scores": evaluate_sample_scores(stage_sample),
+            }
+        )
+    return payloads
 
 
 def _serialize_traces(traces: Sequence[go.BaseTraceType]) -> List[Dict]:
@@ -625,18 +680,17 @@ def _serialize_traces(traces: Sequence[go.BaseTraceType]) -> List[Dict]:
 
 
 def _sample_state(sample: Dict, projection: str) -> Dict:
-    sampled = _structure_traces(sample, prefix="")
+    sampled_trajectory = _trajectory_state_payloads(sample)
+    sampled = sampled_trajectory[-1]["structure"]
     original = _structure_traces(sample, prefix="original_") if "original_brick_anchors" in sample else sampled
     target = _target_trace_sets(sample)
     return {
         "meta": _sample_meta(sample),
+        "scores": evaluate_sample_scores(sample),
+        "sampled_trajectory": sampled_trajectory,
         "scene": _scene_spec(sample, projection=projection),
         "structures": {
-            "sampled": {
-                "bricks": _serialize_traces(sampled["bricks"]),
-                "surfaces": _serialize_traces(sampled["surfaces"]),
-                "dipole_specs": sampled["dipole_specs"],
-            },
+            "sampled": sampled,
             "original": {
                 "bricks": _serialize_traces(original["bricks"]),
                 "surfaces": _serialize_traces(original["surfaces"]),
@@ -688,15 +742,22 @@ def _build_html(
             "uirevision": "legend",
         },
         "scene": initial_state["scene"],
-        "scene2": initial_state["scene"],
         "uirevision": f"sample-{initial_index}",
     }
-    figure = go.Figure(data=[], layout=base_layout)
-    plot_html = pio.to_html(
-        figure,
+    left_figure = go.Figure(data=[], layout=base_layout)
+    right_figure = go.Figure(data=[], layout=base_layout)
+    left_plot_html = pio.to_html(
+        left_figure,
         full_html=False,
         include_plotlyjs="cdn",
-        div_id="lego-plot",
+        div_id="lego-plot-left",
+        config={"responsive": True, "displaylogo": False},
+    )
+    right_plot_html = pio.to_html(
+        right_figure,
+        full_html=False,
+        include_plotlyjs=False,
+        div_id="lego-plot-right",
         config={"responsive": True, "displaylogo": False},
     )
 
@@ -734,7 +795,7 @@ def _build_html(
     }}
     .controls {{
       display: grid;
-      grid-template-columns: repeat(7, minmax(0, 1fr));
+      grid-template-columns: repeat(8, minmax(0, 1fr));
       gap: 12px;
       align-items: end;
       margin-bottom: 10px;
@@ -744,6 +805,9 @@ def _build_html(
       flex-direction: column;
       gap: 6px;
       min-width: 0;
+    }}
+    .control.hidden {{
+      display: none;
     }}
     .control label {{
       font-size: 12px;
@@ -791,21 +855,211 @@ def _build_html(
       color: #4e5a65;
       margin-top: 4px;
     }}
-    #lego-plot {{
-      height: calc(100vh - 180px);
-      min-height: 720px;
+    .score-panel {{
+      margin: 0 0 12px 0;
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.76);
+      border: 1px solid rgba(29, 35, 41, 0.08);
+    }}
+    .score-table {{
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      margin-bottom: 12px;
+    }}
+    .score-table th,
+    .score-table td {{
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(29, 35, 41, 0.08);
+      text-align: left;
+      vertical-align: middle;
+    }}
+    .score-table th {{
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #58626c;
+    }}
+    .score-name {{
+      font-weight: 600;
+      color: #1d2329;
+    }}
+    .score-value {{
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+    }}
+    .score-value.good {{
+      color: #215c33;
+    }}
+    .score-value.warning {{
+      color: #8a6518;
+    }}
+    .score-value.bad {{
+      color: #9a2b2b;
+    }}
+    .score-delta.negative {{
+      color: #9a2b2b;
+    }}
+    .score-delta.positive {{
+      color: #215c33;
+    }}
+    .score-badges {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 12px;
+    }}
+    .badge-card {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-radius: 999px;
+      background: rgba(245, 241, 233, 0.9);
+      border: 1px solid rgba(29, 35, 41, 0.08);
+      padding: 8px 12px;
+    }}
+    .badge-label {{
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #58626c;
+    }}
+    .badge-pill {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 72px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #ffffff;
+    }}
+    .badge-pill.good {{
+      background: #215c33;
+    }}
+    .badge-pill.warning {{
+      background: #8a6518;
+    }}
+    .badge-pill.bad {{
+      background: #9a2b2b;
+    }}
+    .badge-pill.neutral {{
+      background: #697582;
+    }}
+    .badge-summary {{
+      font-size: 13px;
+      color: #26303a;
+      font-variant-numeric: tabular-nums;
+    }}
+    .score-details {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .score-card {{
+      border-radius: 14px;
+      background: rgba(245, 241, 233, 0.9);
+      border: 1px solid rgba(29, 35, 41, 0.08);
+      padding: 10px 12px;
+    }}
+    .score-card summary {{
+      cursor: pointer;
+      font-weight: 600;
+      color: #1d2329;
+      list-style: none;
+    }}
+    .score-card summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .score-card-body {{
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }}
+    .score-section-title {{
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #58626c;
+      margin-top: 4px;
+    }}
+    .metric-row {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+      line-height: 1.35;
+      color: #26303a;
+    }}
+    .metric-row span:last-child {{
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }}
+    .plot-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 12px;
+    }}
+    .plot-panel {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+    }}
+    .plot-panel-title {{
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #1d2329;
+      padding: 0 2px;
+    }}
+    #lego-plot-left,
+    #lego-plot-right {{
+      height: calc(100vh - 220px);
+      min-height: 680px;
       border-radius: 18px;
       overflow: hidden;
       box-shadow: 0 18px 50px rgba(32, 34, 36, 0.10);
       background: rgba(255, 255, 255, 0.58);
     }}
+    .button-row {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .button-row button {{
+      font: inherit;
+      border: 1px solid rgba(29, 35, 41, 0.16);
+      background: rgba(255, 255, 255, 0.86);
+      border-radius: 10px;
+      padding: 9px 10px;
+      color: #1d2329;
+      cursor: pointer;
+    }}
+    .button-row button:hover {{
+      background: rgba(255, 255, 255, 0.98);
+    }}
     @media (max-width: 1100px) {{
       .controls {{
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }}
-      #lego-plot {{
+      .score-details {{
+        grid-template-columns: repeat(1, minmax(0, 1fr));
+      }}
+      .plot-grid {{
+        grid-template-columns: 1fr;
+      }}
+      #lego-plot-left,
+      #lego-plot-right {{
         min-height: 560px;
-        height: calc(100vh - 240px);
+        height: calc(100vh - 280px);
       }}
     }}
   </style>
@@ -816,6 +1070,11 @@ def _build_html(
       <div class="control">
         <label for="sample-select">Sample</label>
         <select id="sample-select">{sample_options}</select>
+      </div>
+      <div id="trajectory-control" class="control hidden">
+        <label for="trajectory-slider">Sampling Step</label>
+        <input id="trajectory-slider" type="range" min="0" max="0" step="1" value="0">
+        <div id="trajectory-label" class="slider-value">final</div>
       </div>
       <div class="control">
         <label for="display-select">Geometry</label>
@@ -854,16 +1113,39 @@ def _build_html(
         <input id="block-opacity" type="range" min="{MIN_BLOCK_OPACITY}" max="{MAX_BLOCK_OPACITY}" step="0.05" value="{DEFAULT_BLOCK_OPACITY}">
         <div id="block-opacity-value" class="slider-value">{DEFAULT_BLOCK_OPACITY:.2f}</div>
       </div>
+      <div class="control">
+        <label>Camera Sync</label>
+        <div class="button-row">
+          <button id="sync-left-to-right" type="button">Left to Right</button>
+          <button id="sync-right-to-left" type="button">Right to Left</button>
+        </div>
+      </div>
+    </div>
+    <div class="plot-grid">
+      <div class="plot-panel">
+        <div id="left-view-label" class="plot-panel-title">Left View</div>
+        {left_plot_html}
+      </div>
+      <div class="plot-panel">
+        <div id="right-view-label" class="plot-panel-title">Right View</div>
+        {right_plot_html}
+      </div>
     </div>
     <div id="sample-meta" class="meta"></div>
-    {plot_html}
+    <div id="sample-scores" class="score-panel"></div>
   </div>
   <script>
     const legoStates = {state_json};
     const baseLayout = {layout_json};
     const preferredLeftStructure = {preferred_left_structure};
-    const plotEl = document.getElementById("lego-plot");
+    const plotLeftEl = document.getElementById("lego-plot-left");
+    const plotRightEl = document.getElementById("lego-plot-right");
+    const leftViewLabel = document.getElementById("left-view-label");
+    const rightViewLabel = document.getElementById("right-view-label");
     const sampleSelect = document.getElementById("sample-select");
+    const trajectoryControl = document.getElementById("trajectory-control");
+    const trajectorySlider = document.getElementById("trajectory-slider");
+    const trajectoryLabel = document.getElementById("trajectory-label");
     const displaySelect = document.getElementById("display-select");
     const targetSelect = document.getElementById("target-select");
     const projectionSelect = document.getElementById("projection-select");
@@ -872,9 +1154,11 @@ def _build_html(
     const dipoleLengthValue = document.getElementById("dipole-length-value");
     const blockOpacity = document.getElementById("block-opacity");
     const blockOpacityValue = document.getElementById("block-opacity-value");
+    const syncLeftToRight = document.getElementById("sync-left-to-right");
+    const syncRightToLeft = document.getElementById("sync-right-to-left");
     const metaEl = document.getElementById("sample-meta");
+    const scoreEl = document.getElementById("sample-scores");
     let lastRenderedSampleIndex = null;
-    let syncingCamera = false;
 
     function deepClone(value) {{
       return JSON.parse(JSON.stringify(value));
@@ -922,8 +1206,74 @@ def _build_html(
       }};
     }}
 
+    function sampledTrajectory(state) {{
+      if (Array.isArray(state.sampled_trajectory) && state.sampled_trajectory.length > 0) {{
+        return state.sampled_trajectory;
+      }}
+      return [{{
+        label: "final",
+        stage_index: 0,
+        scheduler_step: -1,
+        tau: 0.0,
+        structure: state.structures.sampled,
+        scores: state.scores,
+      }}];
+    }}
+
+    function formatTrajectoryStage(stage, stageIndex, totalStages) {{
+      const label = stage?.label || (stageIndex === totalStages - 1 ? "final" : `stage ${{stageIndex}}`);
+      const extras = [];
+      if (Number.isFinite(Number(stage?.scheduler_step)) && Number(stage.scheduler_step) >= 0) {{
+        extras.push(`t=${{Number(stage.scheduler_step)}}`);
+      }}
+      if (Number.isFinite(Number(stage?.tau))) {{
+        extras.push(`tau=${{Number(stage.tau).toFixed(3)}}`);
+      }}
+      return extras.length > 0 ? `${{label}} · ${{extras.join(" · ")}}` : label;
+    }}
+
+    function updateTrajectoryControl(state, resetToFinal = false) {{
+      const trajectory = sampledTrajectory(state);
+      const hasTrajectory = trajectory.length > 1;
+      trajectoryControl.classList.toggle("hidden", !hasTrajectory);
+      trajectorySlider.disabled = !hasTrajectory;
+      trajectorySlider.min = "0";
+      trajectorySlider.max = String(Math.max(trajectory.length - 1, 0));
+      if (resetToFinal || trajectorySlider.value === "") {{
+        trajectorySlider.value = String(Math.max(trajectory.length - 1, 0));
+      }}
+      const clampedIndex = Math.min(
+        Math.max(Number(trajectorySlider.value || "0"), 0),
+        Math.max(trajectory.length - 1, 0)
+      );
+      trajectorySlider.value = String(clampedIndex);
+      trajectoryLabel.textContent = formatTrajectoryStage(trajectory[clampedIndex], clampedIndex, trajectory.length);
+      return clampedIndex;
+    }}
+
+    function currentSampledStage(state) {{
+      const trajectory = sampledTrajectory(state);
+      const stageIndex = Math.min(
+        Math.max(Number(trajectorySlider.value || "0"), 0),
+        Math.max(trajectory.length - 1, 0)
+      );
+      return trajectory[stageIndex];
+    }}
+
+    function structurePayloadForKey(state, structureKey) {{
+      if (structureKey === "sampled") {{
+        const stage = currentSampledStage(state);
+        if (stage && stage.structure) {{
+          return stage.structure;
+        }}
+      }}
+      return state.structures[structureKey];
+    }}
+
     function buildMeta(state, sampleIndex) {{
       const pair = resolveStructurePair(state);
+      const sampledStage = currentSampledStage(state);
+      const trajectory = sampledTrajectory(state);
       const bits = [
         `Sample ${{sampleIndex}}`,
         `${{state.meta.num_bricks}} bricks`,
@@ -941,6 +1291,9 @@ def _build_html(
       if (Object.prototype.hasOwnProperty.call(state.meta, "occupancy_mode")) {{
         bits.push(`${{state.meta.occupancy_mode}} occupancy`);
       }}
+      if (trajectory.length > 1) {{
+        bits.push(`stage ${{formatTrajectoryStage(sampledStage, Number(trajectorySlider.value || "0"), trajectory.length)}}`);
+      }}
       const shellDetails = [];
       if (state.meta.occupancy_mode === "shell") {{
         if (Object.prototype.hasOwnProperty.call(state.meta, "shell_thickness")) {{
@@ -951,14 +1304,302 @@ def _build_html(
         }}
       }}
       const structureLabel = state.meta.has_original
-        ? `${{pair.leftLabel}} on the left and ${{pair.rightLabel.toLowerCase()}} on the right share the same camera orientation.`
+        ? `${{pair.leftLabel}} is shown on the left and ${{pair.rightLabel.toLowerCase()}} on the right. Rotate them independently, use the sync buttons above, or double-click a view to copy its camera to the other.`
         : "Both views show the same sampled assembly because this dataset has no original/reference structure.";
       metaEl.innerHTML = `
         <strong>${{bits.join(" · ")}}</strong>
         <div class="note">
           Smooth SH target = the continuous spherical-harmonic surface before voxelization and brick approximation.
+          Geometry view: Full bricks renders brick type/rotation geometry. On sampled trajectories, ligand brick type/rotation is decoded from the current SH shape field at each stage; Node SH surfaces shows that diffused per-node SH shape field directly.
           ${{shellDetails.length > 0 ? ` Shell generation: ${{shellDetails.join(" · ")}}.` : ""}}
           ${{structureLabel}}
+        </div>
+      `;
+    }}
+
+    function formatMetric(value, digits = 3) {{
+      if (value === null || value === undefined) {{
+        return "n/a";
+      }}
+      if (typeof value === "boolean") {{
+        return value ? "yes" : "no";
+      }}
+      if (typeof value === "number") {{
+        if (!Number.isFinite(value)) {{
+          return "n/a";
+        }}
+        return Number(value).toFixed(digits);
+      }}
+      return String(value);
+    }}
+
+    function formatDelta(value) {{
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) {{
+        return {{ text: "n/a", className: "" }};
+      }}
+      const numeric = Number(value);
+      const sign = numeric > 1e-8 ? "+" : "";
+      return {{
+        text: `${{sign}}${{numeric.toFixed(2)}}`,
+        className: numeric < -1e-8 ? "negative" : numeric > 1e-8 ? "positive" : "",
+      }};
+    }}
+
+    function scoreTone(value) {{
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) {{
+        return "";
+      }}
+      if (numeric >= 85.0) {{
+        return "good";
+      }}
+      if (numeric >= 60.0) {{
+        return "warning";
+      }}
+      return "bad";
+    }}
+
+    function overallScore(scoreSet) {{
+      if (!scoreSet) {{
+        return NaN;
+      }}
+      const validity = Number(scoreSet.validity);
+      const dipoles = Number(scoreSet.dipoles);
+      if (![validity, dipoles].every(Number.isFinite)) {{
+        return NaN;
+      }}
+      return 0.70 * validity + 0.30 * dipoles;
+    }}
+
+    function badgePayload(scoreSet) {{
+      const overall = overallScore(scoreSet);
+      const validity = Number(scoreSet?.validity);
+      if (!Number.isFinite(overall) || !Number.isFinite(validity)) {{
+        return {{
+          label: "n/a",
+          className: "neutral",
+          summary: "overall n/a",
+        }};
+      }}
+      if (validity < 5.0) {{
+        return {{
+          label: "Fail",
+          className: "bad",
+          summary: `overall ${{overall.toFixed(1)}}`,
+        }};
+      }}
+      if (validity >= 95.0 && overall >= 80.0) {{
+        return {{
+          label: "Pass",
+          className: "good",
+          summary: `overall ${{overall.toFixed(1)}}`,
+        }};
+      }}
+      if (validity >= 60.0 && overall >= 55.0) {{
+        return {{
+          label: "Warning",
+          className: "warning",
+          summary: `overall ${{overall.toFixed(1)}}`,
+        }};
+      }}
+      return {{
+        label: "Fail",
+        className: "bad",
+        summary: `overall ${{overall.toFixed(1)}}`,
+      }};
+    }}
+
+    function renderBadgeCard(label, badge) {{
+      return `
+        <div class="badge-card">
+          <span class="badge-label">${{label}}</span>
+          <span class="badge-pill ${{badge.className}}">${{badge.label}}</span>
+          <span class="badge-summary">${{badge.summary}}</span>
+        </div>
+      `;
+    }}
+
+    function renderMetricRows(rows, metrics) {{
+      return rows.map(([label, key, digits]) => {{
+        const value = Object.prototype.hasOwnProperty.call(metrics, key) ? metrics[key] : null;
+        return `
+          <div class="metric-row">
+            <span>${{label}}</span>
+            <span>${{formatMetric(value, digits)}}</span>
+          </div>
+        `;
+      }}).join("");
+    }}
+
+    function buildScoreCardDetails(title, payload, openByDefault = true) {{
+      if (!payload) {{
+        return "";
+      }}
+      const metrics = payload.metrics || {{}};
+      const hasTargetMetrics = Object.prototype.hasOwnProperty.call(metrics, "target_f1");
+      const targetSection = hasTargetMetrics
+        ? `
+          <div class="score-section-title">Target</div>
+          ${{renderMetricRows([
+            ["Target coverage", "target_coverage", 3],
+            ["Target precision", "target_precision", 3],
+            ["Target F1", "target_f1", 3],
+            ["Mean target->structure", "mean_target_to_structure_distance", 3],
+            ["Mean structure->target", "mean_structure_to_target_distance", 3],
+          ], metrics)}}
+        `
+        : "";
+      return `
+        <details class="score-card"${{openByDefault ? " open" : ""}}>
+          <summary>${{title}}</summary>
+          <div class="score-card-body">
+            <div class="score-section-title">Validity</div>
+            ${{renderMetricRows([
+              ["Valid-like geometry", "is_valid_like", 0],
+              ["Overlap volume", "total_overlap_volume", 3],
+              ["Effective overlap", "effective_overlap_volume", 3],
+              ["Clashing brick pairs", "clashing_brick_pairs", 0],
+              ["Micro overlap pairs", "micro_overlapping_pairs", 0],
+              ["Severe overlap pairs", "severe_overlapping_pairs", 0],
+              ["Max pair overlap", "max_pair_overlap_volume", 3],
+              ["Connected components", "num_components", 0],
+            ], metrics)}}
+            <div class="score-section-title">Compactness</div>
+            ${{renderMetricRows([
+              ["Matched face area", "matched_face_area", 3],
+              ["Matched face ratio", "matched_face_ratio", 3],
+              ["Connected brick pairs", "connected_brick_pairs", 0],
+              ["Intrinsic faces", "intrinsic_face_count", 0],
+            ], metrics)}}
+            <div class="score-section-title">Shellness</div>
+            ${{renderMetricRows([
+              ["Shell surface ratio", "shell_surface_ratio", 3],
+            ], metrics)}}
+            <div class="score-section-title">Dipoles</div>
+            ${{renderMetricRows([
+              ["Attractive contact area", "attractive_contact_area", 3],
+              ["Repulsive contact area", "repulsive_contact_area", 3],
+              ["Neutral contact area", "neutral_contact_area", 3],
+              ["Total contact area", "total_contact_area", 3],
+              ["Weighted dipole energy", "weighted_dipole_energy", 3],
+              ["Mean weighted energy", "mean_weighted_dipole_energy", 3],
+            ], metrics)}}
+            ${{targetSection}}
+          </div>
+        </details>
+      `;
+    }}
+
+    function buildCompareDetails(comparePayload) {{
+      if (!comparePayload) {{
+        return "";
+      }}
+      const shift = comparePayload.anchor_shift || {{}};
+      const deltas = comparePayload.metric_delta || {{}};
+      const scoreDelta = comparePayload.score_delta || {{}};
+      return `
+        <details class="score-card">
+          <summary>Sampled vs Original</summary>
+          <div class="score-card-body">
+            <div class="score-section-title">Scores</div>
+            <div class="metric-row"><span>Validity delta</span><span>${{formatMetric(scoreDelta.validity, 2)}}</span></div>
+            <div class="metric-row"><span>Compactness delta</span><span>${{formatMetric(scoreDelta.compactness, 2)}}</span></div>
+            <div class="metric-row"><span>Shellness delta</span><span>${{formatMetric(scoreDelta.shellness, 2)}}</span></div>
+            <div class="metric-row"><span>Dipoles delta</span><span>${{formatMetric(scoreDelta.dipoles, 2)}}</span></div>
+            <div class="score-section-title">Geometry</div>
+            ${{renderMetricRows([
+              ["Diffused shift mean", "diffused_shift_mean", 3],
+              ["Diffused shift max", "diffused_shift_max", 3],
+              ["Fixed shift mean", "fixed_shift_mean", 3],
+              ["Fixed shift max", "fixed_shift_max", 3],
+            ], shift)}}
+            <div class="score-section-title">Metric deltas</div>
+            ${{renderMetricRows([
+              ["Overlap delta", "overlap_volume", 3],
+              ["Matched-face ratio delta", "matched_face_ratio", 3],
+              ["Shell surface delta", "shell_surface_ratio", 3],
+              ["Dipole energy delta", "weighted_dipole_energy", 3],
+            ], deltas)}}
+          </div>
+        </details>
+      `;
+    }}
+
+    function buildScorePanel(state) {{
+      const sampledStage = currentSampledStage(state);
+      const scorePayload = sampledStage?.scores || state.scores || null;
+      if (!scorePayload || !scorePayload.sampled) {{
+        scoreEl.innerHTML = "";
+        return;
+      }}
+
+      const sampledScores = scorePayload.sampled.scores || {{}};
+      const originalScores = scorePayload.original ? scorePayload.original.scores || {{}} : null;
+      const sampledOverall = overallScore(sampledScores);
+      const originalOverall = originalScores ? overallScore(originalScores) : null;
+      const overallDelta = formatDelta(
+        originalScores && Number.isFinite(sampledOverall) && Number.isFinite(originalOverall)
+          ? sampledOverall - originalOverall
+          : null
+      );
+      const validityDelta = formatDelta(scorePayload.compare?.score_delta?.validity);
+      const compactnessDelta = formatDelta(scorePayload.compare?.score_delta?.compactness);
+      const shellnessDelta = formatDelta(scorePayload.compare?.score_delta?.shellness);
+      const dipolesDelta = formatDelta(scorePayload.compare?.score_delta?.dipoles);
+      const sampledBadge = badgePayload(sampledScores);
+      const originalBadge = originalScores ? badgePayload(originalScores) : null;
+
+      scoreEl.innerHTML = `
+        <div class="score-badges">
+          ${{renderBadgeCard("Sampled", sampledBadge)}}
+          ${{originalBadge ? renderBadgeCard("Original", originalBadge) : ""}}
+        </div>
+        <table class="score-table">
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Sampled</th>
+              <th>Original</th>
+              <th>Delta</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="score-name">Overall</td>
+              <td class="score-value ${{scoreTone(sampledOverall)}}">${{formatMetric(sampledOverall, 2)}}</td>
+              <td class="score-value ${{originalScores ? scoreTone(originalOverall) : ""}}">${{originalScores ? formatMetric(originalOverall, 2) : "n/a"}}</td>
+              <td class="score-value score-delta ${{overallDelta.className}}">${{overallDelta.text}}</td>
+            </tr>
+            <tr>
+              <td class="score-name">Validity</td>
+              <td class="score-value ${{scoreTone(sampledScores.validity)}}">${{formatMetric(sampledScores.validity, 2)}}</td>
+              <td class="score-value ${{originalScores ? scoreTone(originalScores.validity) : ""}}">${{originalScores ? formatMetric(originalScores.validity, 2) : "n/a"}}</td>
+              <td class="score-value score-delta ${{validityDelta.className}}">${{validityDelta.text}}</td>
+            </tr>
+            <tr>
+              <td class="score-name">Compactness</td>
+              <td class="score-value ${{scoreTone(sampledScores.compactness)}}">${{formatMetric(sampledScores.compactness, 2)}}</td>
+              <td class="score-value ${{originalScores ? scoreTone(originalScores.compactness) : ""}}">${{originalScores ? formatMetric(originalScores.compactness, 2) : "n/a"}}</td>
+              <td class="score-value score-delta ${{compactnessDelta.className}}">${{compactnessDelta.text}}</td>
+            </tr>
+            <tr>
+              <td class="score-name">Shellness</td>
+              <td class="score-value ${{scoreTone(sampledScores.shellness)}}">${{formatMetric(sampledScores.shellness, 2)}}</td>
+              <td class="score-value ${{originalScores ? scoreTone(originalScores.shellness) : ""}}">${{originalScores ? formatMetric(originalScores.shellness, 2) : "n/a"}}</td>
+              <td class="score-value score-delta ${{shellnessDelta.className}}">${{shellnessDelta.text}}</td>
+            </tr>
+            <tr>
+              <td class="score-name">Dipoles</td>
+              <td class="score-value ${{scoreTone(sampledScores.dipoles)}}">${{formatMetric(sampledScores.dipoles, 2)}}</td>
+              <td class="score-value ${{originalScores ? scoreTone(originalScores.dipoles) : ""}}">${{originalScores ? formatMetric(originalScores.dipoles, 2) : "n/a"}}</td>
+              <td class="score-value score-delta ${{dipolesDelta.className}}">${{dipolesDelta.text}}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="score-details">
+          ${{buildScoreCardDetails("Sampled details", scorePayload.sampled, false)}}
+          ${{scorePayload.original ? buildScoreCardDetails("Original details", scorePayload.original, false) : ""}}
+          ${{buildCompareDetails(scorePayload.compare)}}
         </div>
       `;
     }}
@@ -973,20 +1614,20 @@ def _build_html(
       }});
     }}
 
-    function sceneifyTrace(trace, sceneKey, showLegend, fallbackGroup, fallbackUid) {{
-      trace.scene = sceneKey;
+    function sceneifyTrace(trace, showLegend, fallbackGroup, fallbackUid) {{
+      trace.scene = "scene";
       trace.showlegend = Boolean(showLegend) && trace.showlegend !== false;
       trace.legendgroup = trace.legendgroup || fallbackGroup;
-      trace.uid = `${{trace.uid || fallbackUid}}-${{sceneKey}}`;
+      trace.uid = `${{trace.uid || fallbackUid}}-scene`;
       return trace;
     }}
 
-    function structureTracesForScene(state, structureKey, display, sceneKey, showLegend) {{
-      const traces = applyStructureOpacity(deepClone(state.structures[structureKey][display]));
+    function structureTracesForPlot(state, structureKey, display, showLegend) {{
+      const structurePayload = structurePayloadForKey(state, structureKey);
+      const traces = applyStructureOpacity(deepClone(structurePayload[display]));
       return traces.map((trace, index) =>
         sceneifyTrace(
           trace,
-          sceneKey,
           showLegend,
           trace.legendgroup || `brick-pair-${{structureKey}}-${{index}}`,
           trace.uid || `${{structureKey}}-${{display}}-${{index}}`
@@ -994,13 +1635,12 @@ def _build_html(
       );
     }}
 
-    function targetTracesForScene(state, targetMode, sceneKey, showLegend) {{
+    function targetTracesForPlot(state, targetMode, showLegend) {{
       const traces = deepClone(state.target[targetMode] || []);
       const legendGroup = `target-${{targetMode}}`;
       return traces.map((trace, index) =>
         sceneifyTrace(
           trace,
-          sceneKey,
           showLegend && index === 0,
           legendGroup,
           `target-${{targetMode}}-${{index}}`
@@ -1008,7 +1648,7 @@ def _build_html(
       );
     }}
 
-    function buildDipoleTraces(specs, sceneKey) {{
+    function buildDipoleTraces(specs) {{
       const lengthScale = Number(dipoleLength.value);
       const coneRef = Math.max(0.12, 0.55 * Math.max(0.12, 0.28 * lengthScale));
       const traces = [];
@@ -1051,13 +1691,13 @@ def _build_html(
           x: lineX,
           y: lineY,
           z: lineZ,
-          scene: sceneKey,
+          scene: "scene",
           mode: "lines",
           line: {{ width: 7, color: spec.color }},
           name: spec.name,
           showlegend: false,
           hoverinfo: "skip",
-          uid: `dipole-line-${{sceneKey}}-${{specIndex}}`
+          uid: `dipole-line-${{specIndex}}`
         }});
         traces.push({{
           type: "cone",
@@ -1067,7 +1707,7 @@ def _build_html(
           u: coneU,
           v: coneV,
           w: coneW,
-          scene: sceneKey,
+          scene: "scene",
           anchor: "tip",
           showscale: false,
           showlegend: false,
@@ -1078,25 +1718,21 @@ def _build_html(
           sizemode: "absolute",
           sizeref: coneRef,
           name: spec.name,
-          uid: `dipole-cone-${{sceneKey}}-${{specIndex}}`
+          uid: `dipole-cone-${{specIndex}}`
         }});
       }});
       return traces;
     }}
 
-    function currentTraces(state) {{
-      const pair = resolveStructurePair(state);
+    function currentTracesForStructure(state, structureKey) {{
       const display = displaySelect.value;
       const targetMode = normalizeTargetMode(targetSelect.value);
       let traces = [];
-      traces = traces.concat(structureTracesForScene(state, pair.leftKey, display, "scene", true));
-      traces = traces.concat(structureTracesForScene(state, pair.rightKey, display, "scene2", false));
+      traces = traces.concat(structureTracesForPlot(state, structureKey, display, true));
       if (dipoleToggle.checked) {{
-        traces = traces.concat(buildDipoleTraces(state.structures[pair.leftKey].dipole_specs, "scene"));
-        traces = traces.concat(buildDipoleTraces(state.structures[pair.rightKey].dipole_specs, "scene2"));
+        traces = traces.concat(buildDipoleTraces(structurePayloadForKey(state, structureKey).dipole_specs));
       }}
-      traces = traces.concat(targetTracesForScene(state, targetMode, "scene", true));
-      traces = traces.concat(targetTracesForScene(state, targetMode, "scene2", false));
+      traces = traces.concat(targetTracesForPlot(state, targetMode, true));
       return traces;
     }}
 
@@ -1106,171 +1742,148 @@ def _build_html(
       return result;
     }}
 
-    function getSceneCamera(sceneKey) {{
-      const fullScene = plotEl._fullLayout && plotEl._fullLayout[sceneKey];
+    function getSceneCamera(plotEl) {{
+      const fullScene = plotEl && plotEl._fullLayout && plotEl._fullLayout.scene;
       if (fullScene && fullScene.camera) {{
         return deepClone(fullScene.camera);
       }}
-      const layoutScene = plotEl.layout && plotEl.layout[sceneKey];
+      const layoutScene = plotEl && plotEl.layout && plotEl.layout.scene;
       if (layoutScene && layoutScene.camera) {{
         return deepClone(layoutScene.camera);
       }}
       return null;
     }}
 
-    function currentLayout(state, sampleIndex) {{
-      const pair = resolveStructurePair(state);
+    function currentLayout(state, sampleIndex, plotEl) {{
       const layout = deepClone(baseLayout);
       const sceneBase = mergeInto(deepClone(layout.scene || {{}}), deepClone(state.scene));
-      const scene2Base = mergeInto(deepClone(layout.scene2 || {{}}), deepClone(state.scene));
-      sceneBase.domain = {{ x: [0.0, 0.48], y: [0.0, 1.0] }};
-      scene2Base.domain = {{ x: [0.52, 1.0], y: [0.0, 1.0] }};
       sceneBase.camera = cameraWithProjection(sceneBase.camera || {{}});
-      scene2Base.camera = cameraWithProjection(scene2Base.camera || sceneBase.camera || {{}});
 
       if (lastRenderedSampleIndex === sampleIndex) {{
-        const currentLeftCamera = getSceneCamera("scene");
-        const currentRightCamera = getSceneCamera("scene2");
-        if (currentLeftCamera) {{
-          sceneBase.camera = cameraWithProjection(currentLeftCamera);
-        }}
-        if (currentRightCamera) {{
-          scene2Base.camera = cameraWithProjection(currentRightCamera);
-        }} else if (currentLeftCamera) {{
-          scene2Base.camera = cameraWithProjection(currentLeftCamera);
+        const currentCamera = getSceneCamera(plotEl);
+        if (currentCamera) {{
+          sceneBase.camera = cameraWithProjection(currentCamera);
         }}
       }}
 
       layout.scene = sceneBase;
-      layout.scene2 = scene2Base;
       layout.scene.uirevision = `scene-${{sampleIndex}}-${{projectionSelect.value}}`;
-      layout.scene2.uirevision = `scene2-${{sampleIndex}}-${{projectionSelect.value}}`;
       layout.legend = layout.legend || {{}};
       layout.legend.uirevision = `legend-${{sampleIndex}}`;
       layout.uirevision = `sample-${{sampleIndex}}`;
-      layout.annotations = [
-        {{
-          text: pair.leftLabel,
-          x: 0.24,
-          y: 1.02,
-          xref: "paper",
-          yref: "paper",
-          xanchor: "center",
-          yanchor: "bottom",
-          showarrow: false,
-          font: {{ size: 14, color: "#1d2329" }},
-        }},
-        {{
-          text: pair.rightLabel,
-          x: 0.76,
-          y: 1.02,
-          xref: "paper",
-          yref: "paper",
-          xanchor: "center",
-          yanchor: "bottom",
-          showarrow: false,
-          font: {{ size: 14, color: "#1d2329" }},
-        }},
-      ];
+      layout.annotations = [];
       return layout;
     }}
 
-    function extractCameraPatch(eventData, sceneKey) {{
-      if (eventData[`${{sceneKey}}.camera`]) {{
-        return deepClone(eventData[`${{sceneKey}}.camera`]);
+    function normalizeCamera(camera) {{
+      if (!camera || typeof camera !== "object") {{
+        return null;
       }}
-      if (eventData[sceneKey] && eventData[sceneKey].camera) {{
-        return deepClone(eventData[sceneKey].camera);
-      }}
-      const prefix = `${{sceneKey}}.camera.`;
-      const patch = {{}};
-      let found = false;
-      Object.entries(eventData).forEach(([key, value]) => {{
-        if (!key.startsWith(prefix)) {{
-          return;
-        }}
-        found = true;
-        const path = key.slice(prefix.length).split(".");
-        let cursor = patch;
-        for (let idx = 0; idx < path.length - 1; idx += 1) {{
-          const part = path[idx];
-          cursor[part] = cursor[part] || {{}};
-          cursor = cursor[part];
-        }}
-        cursor[path[path.length - 1]] = value;
-      }});
-      return found ? patch : null;
+      return {{
+        center: camera.center || null,
+        eye: camera.eye || null,
+        up: camera.up || null,
+        projection: camera.projection || null,
+      }};
     }}
 
-    function syncCamera(targetSceneKey, cameraPatch) {{
-      if (!cameraPatch) {{
+    function cameraEquals(left, right) {{
+      return JSON.stringify(normalizeCamera(left)) === JSON.stringify(normalizeCamera(right));
+    }}
+
+    function syncCamera(sourcePlotEl, targetPlotEl) {{
+      const sourceCamera = getSceneCamera(sourcePlotEl);
+      if (!sourceCamera) {{
         return;
       }}
-      const currentCamera = getSceneCamera(targetSceneKey) || {{}};
-      const nextCamera = mergeInto(deepClone(currentCamera), cameraPatch);
-      nextCamera.projection = {{ type: projectionSelect.value }};
-      syncingCamera = true;
-      Plotly.relayout(plotEl, {{
-        [`${{targetSceneKey}}.camera`]: nextCamera,
-      }}).finally(() => {{
-        syncingCamera = false;
-      }});
+      const nextCamera = cameraWithProjection(sourceCamera);
+      const currentCamera = getSceneCamera(targetPlotEl) || {{}};
+      if (cameraEquals(currentCamera, nextCamera)) {{
+        return;
+      }}
+      Plotly.relayout(targetPlotEl, {{ "scene.camera": nextCamera }});
+    }}
+
+    function viewPair(state) {{
+      const pair = resolveStructurePair(state);
+      return {{
+        left: pair.leftKey,
+        right: pair.rightKey,
+        leftLabel: pair.leftLabel,
+        rightLabel: pair.rightLabel,
+      }};
     }}
 
     function render() {{
       const sampleIndex = Number(sampleSelect.value);
       const state = legoStates[sampleIndex];
-      const traces = currentTraces(state);
-      const layout = currentLayout(state, sampleIndex);
-      Plotly.react(plotEl, traces, layout, {{ responsive: true, displaylogo: false }});
+      const sampleChanged = lastRenderedSampleIndex !== sampleIndex;
+      const pair = viewPair(state);
+      updateTrajectoryControl(state, sampleChanged);
+      leftViewLabel.textContent = pair.leftLabel;
+      rightViewLabel.textContent = pair.rightLabel;
+      const leftTraces = currentTracesForStructure(state, pair.left);
+      const rightTraces = currentTracesForStructure(state, pair.right);
+      const leftLayout = currentLayout(state, sampleIndex, plotLeftEl);
+      const rightLayout = currentLayout(state, sampleIndex, plotRightEl);
+      Plotly.react(plotLeftEl, leftTraces, leftLayout, {{ responsive: true, displaylogo: false }});
+      Plotly.react(plotRightEl, rightTraces, rightLayout, {{ responsive: true, displaylogo: false }});
       lastRenderedSampleIndex = sampleIndex;
       dipoleLengthValue.textContent = Number(dipoleLength.value).toFixed(2);
       blockOpacityValue.textContent = Number(blockOpacity.value).toFixed(2);
       buildMeta(state, sampleIndex);
+      buildScorePanel(state);
     }}
 
-    plotEl.on("plotly_relayout", (eventData) => {{
-      if (syncingCamera) {{
+    function mirrorLegendVisibility(sourcePlotEl, targetPlotEl, eventData) {{
+      const clickedTrace = sourcePlotEl.data[eventData.curveNumber];
+      if (!clickedTrace) {{
         return;
       }}
-      const leftCameraPatch = extractCameraPatch(eventData, "scene");
-      const rightCameraPatch = extractCameraPatch(eventData, "scene2");
-      if (leftCameraPatch && !rightCameraPatch) {{
-        syncCamera("scene2", leftCameraPatch);
-      }} else if (rightCameraPatch && !leftCameraPatch) {{
-        syncCamera("scene", rightCameraPatch);
-      }}
-    }});
-
-    plotEl.on("plotly_legendclick", (eventData) => {{
-      const clickedTrace = plotEl.data[eventData.curveNumber];
-      if (!clickedTrace) {{
-        return false;
-      }}
       const legendGroup = clickedTrace.legendgroup || clickedTrace.uid || `trace-${{eventData.curveNumber}}`;
-      const traceIndices = [];
-      plotEl.data.forEach((trace, traceIndex) => {{
-        const candidateGroup = trace.legendgroup || trace.uid || `trace-${{traceIndex}}`;
-        if (candidateGroup === legendGroup) {{
-          traceIndices.push(traceIndex);
+      window.setTimeout(() => {{
+        const sourceTraceAfter = sourcePlotEl.data[eventData.curveNumber];
+        if (!sourceTraceAfter) {{
+          return;
         }}
-      }});
-      if (traceIndices.length === 0) {{
-        return false;
-      }}
-      const anyVisible = traceIndices.some((traceIndex) => {{
-        const visibility = plotEl.data[traceIndex].visible;
-        return visibility === undefined || visibility === true;
-      }});
-      Plotly.restyle(plotEl, {{ visible: anyVisible ? "legendonly" : true }}, traceIndices);
+        const sourceVisibility = sourceTraceAfter.visible;
+        const nextVisibility = sourceVisibility === "legendonly" ? "legendonly" : true;
+        const traceIndices = [];
+        targetPlotEl.data.forEach((trace, traceIndex) => {{
+          const candidateGroup = trace.legendgroup || trace.uid || `trace-${{traceIndex}}`;
+          if (candidateGroup === legendGroup) {{
+            traceIndices.push(traceIndex);
+          }}
+        }});
+        if (traceIndices.length > 0) {{
+          Plotly.restyle(targetPlotEl, {{ visible: nextVisibility }}, traceIndices);
+        }}
+      }}, 0);
+    }}
+
+    plotLeftEl.on("plotly_legendclick", (eventData) => {{
+      mirrorLegendVisibility(plotLeftEl, plotRightEl, eventData);
+    }});
+    plotRightEl.on("plotly_legendclick", (eventData) => {{
+      mirrorLegendVisibility(plotRightEl, plotLeftEl, eventData);
+    }});
+    plotLeftEl.on("plotly_doubleclick", () => {{
+      window.setTimeout(() => syncCamera(plotLeftEl, plotRightEl), 0);
+      return false;
+    }});
+    plotRightEl.on("plotly_doubleclick", () => {{
+      window.setTimeout(() => syncCamera(plotRightEl, plotLeftEl), 0);
       return false;
     }});
 
     [sampleSelect, displaySelect, targetSelect, projectionSelect, dipoleToggle].forEach((element) => {{
       element.addEventListener("change", render);
     }});
+    trajectorySlider.addEventListener("input", render);
     dipoleLength.addEventListener("input", render);
     blockOpacity.addEventListener("input", render);
+    syncLeftToRight.addEventListener("click", () => syncCamera(plotLeftEl, plotRightEl));
+    syncRightToLeft.addEventListener("click", () => syncCamera(plotRightEl, plotLeftEl));
 
     render();
   </script>
