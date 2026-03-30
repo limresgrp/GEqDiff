@@ -1,6 +1,6 @@
 from .diffusion import center_pos
 from .noise_schedulers import FlowMatchingScheduler, NoiseScheduler
-from .samplers import DDPMSampler, DDIMSampler, FlowMatchingSampler, RectifiedFlowSampler, Sampler
+from .samplers import DDPMSampler, DDIMSampler, FlowMatchingHeunSampler, FlowMatchingSampler, RectifiedFlowSampler, Sampler
 
 __all__ = [
     center_pos,
@@ -11,4 +11,5 @@ __all__ = [
     DDIMSampler,
     RectifiedFlowSampler,
     FlowMatchingSampler,
+    FlowMatchingHeunSampler,
 ]

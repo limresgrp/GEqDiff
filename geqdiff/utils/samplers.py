@@ -106,12 +106,63 @@ class FlowMatchingSampler(Sampler):
         super().__init__(scheduler)
 
     @torch.no_grad()
-    def step(self, x_t: torch.Tensor, t: int, t_prev: int, velocity_pred: torch.Tensor):
+    def dtau_from_values(self, x_t: torch.Tensor, tau_t, tau_prev) -> torch.Tensor:
+        tau_t = torch.as_tensor(tau_t, device=x_t.device, dtype=x_t.dtype)
+        tau_prev = torch.as_tensor(tau_prev, device=x_t.device, dtype=x_t.dtype)
+        return tau_prev - tau_t
+
+    @torch.no_grad()
+    def dtau(self, x_t: torch.Tensor, t: int, t_prev: int) -> torch.Tensor:
         tau_t = self.scheduler.tau[int(t)].to(device=x_t.device, dtype=x_t.dtype)
         if t_prev < 0:
             tau_prev = torch.tensor(0.0, device=x_t.device, dtype=x_t.dtype)
         else:
             tau_prev = self.scheduler.tau[int(t_prev)].to(device=x_t.device, dtype=x_t.dtype)
-        dtau = tau_prev - tau_t
+        return self.dtau_from_values(x_t=x_t, tau_t=tau_t, tau_prev=tau_prev)
+
+    @torch.no_grad()
+    def step_tau(self, x_t: torch.Tensor, tau_t, tau_prev, velocity_pred: torch.Tensor):
+        dtau = self.dtau_from_values(x_t=x_t, tau_t=tau_t, tau_prev=tau_prev)
         x_t_minus_1 = x_t + dtau * velocity_pred
+        return x_t_minus_1
+
+    @torch.no_grad()
+    def step(self, x_t: torch.Tensor, t: int, t_prev: int, velocity_pred: torch.Tensor):
+        return self.step_tau(
+            x_t=x_t,
+            tau_t=self.scheduler.tau[int(t)].to(device=x_t.device, dtype=x_t.dtype),
+            tau_prev=(torch.tensor(0.0, device=x_t.device, dtype=x_t.dtype) if t_prev < 0 else self.scheduler.tau[int(t_prev)].to(device=x_t.device, dtype=x_t.dtype)),
+            velocity_pred=velocity_pred,
+        )
+
+
+class FlowMatchingHeunSampler(FlowMatchingSampler):
+    """Second-order Heun integrator for the learned flow field."""
+
+    @torch.no_grad()
+    def step(
+        self,
+        x_t: torch.Tensor,
+        t: int,
+        t_prev: int,
+        velocity_pred: torch.Tensor,
+        velocity_pred_next: torch.Tensor,
+    ):
+        dtau = self.dtau(x_t=x_t, t=t, t_prev=t_prev)
+        average_velocity = 0.5 * (velocity_pred + velocity_pred_next)
+        x_t_minus_1 = x_t + dtau * average_velocity
+        return x_t_minus_1
+
+    @torch.no_grad()
+    def step_tau(
+        self,
+        x_t: torch.Tensor,
+        tau_t,
+        tau_prev,
+        velocity_pred: torch.Tensor,
+        velocity_pred_next: torch.Tensor,
+    ):
+        dtau = self.dtau_from_values(x_t=x_t, tau_t=tau_t, tau_prev=tau_prev)
+        average_velocity = 0.5 * (velocity_pred + velocity_pred_next)
+        x_t_minus_1 = x_t + dtau * average_velocity
         return x_t_minus_1

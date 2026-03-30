@@ -371,7 +371,7 @@ train_lego_model() {
 }
 
 sample_lego_blocks() {
-  local latest_model model_path input_path output_path source_path num_samples steps device seed indices_raw save_intermediates
+  local latest_model model_path input_path output_path source_path num_samples steps sampler_name late_refine_from_step late_refine_factor linger_step linger_count device seed indices_raw save_intermediates
   latest_model="$(latest_named_file "${RESULTS_ROOT_PATH}" "best_model.pth")"
   model_path="$(prompt_with_default "Checkpoint path" "${latest_model}")"
   input_path="$(prompt_with_default "Input diffusion dataset path" "${DIFFUSION_DATASET_PATH}")"
@@ -379,6 +379,11 @@ sample_lego_blocks() {
   source_path="$(prompt_with_default "Canonical source dataset path (blank to skip enrichment)" "")"
   num_samples="$(prompt_with_default "Number of samples to draw" "4")"
   steps="$(prompt_with_default "Reverse integration steps" "20")"
+  sampler_name="$(prompt_with_default "Flow-matching sampler (heun/euler)" "heun")"
+  late_refine_from_step="$(prompt_with_default "Late refine from discrete step (-1 disables)" "-1")"
+  late_refine_factor="$(prompt_with_default "Late refine factor" "1")"
+  linger_step="$(prompt_with_default "Experimental linger step (-1 disables)" "-1")"
+  linger_count="$(prompt_with_default "Experimental linger count" "0")"
   device="$(prompt_with_default "Device" "cuda:0")"
   seed="$(prompt_with_default "Random seed" "0")"
   indices_raw="$(prompt_with_default "Explicit diffusion example indices (space-separated, blank for random)" "")"
@@ -401,6 +406,11 @@ sample_lego_blocks() {
     --output "${output_path}"
     --num-samples "${num_samples}"
     --steps "${steps}"
+    --sampler "${sampler_name}"
+    --late-refine-from-step "${late_refine_from_step}"
+    --late-refine-factor "${late_refine_factor}"
+    --linger-step "${linger_step}"
+    --linger-count "${linger_count}"
     --device "${device}"
     --seed "${seed}"
   )
@@ -422,7 +432,7 @@ sample_lego_blocks() {
 }
 
 visualize_lego_dataset() {
-  local default_dataset dataset_path output_html
+  local default_dataset dataset_path output_html trajectory_stride
   default_dataset="${SAMPLED_DATASET_PATH}"
   if [[ ! -f "${default_dataset}" ]]; then
     default_dataset="${SOURCE_DATASET_PATH}"
@@ -430,11 +440,13 @@ visualize_lego_dataset() {
 
   dataset_path="$(prompt_with_default "Dataset path to visualize" "${default_dataset}")"
   output_html="$(prompt_with_default "Optional HTML save path (blank to open only)" "")"
+  trajectory_stride="$(prompt_with_default "Trajectory frame stride" "1")"
 
   local cmd=(
     "${PYTHON_CMD}" "${ROOT_DIR}/lego/lego_visualizer.py"
     --path "${dataset_path}"
     --show-dipoles
+    --trajectory-stride "${trajectory_stride}"
   )
   if [[ -n "${output_html}" ]]; then
     cmd+=(--output-html "${output_html}")

@@ -380,6 +380,18 @@ def _normalize_sample(sample):
         sample["scheduler_step"] = np.asarray(sample["scheduler_step"], dtype=np.int64)
     if "tau" in sample:
         sample["tau"] = np.asarray(sample["tau"], dtype=np.float32)
+    if "sampling_sampler" in sample:
+        sample["sampling_sampler"] = np.asarray(sample["sampling_sampler"]).astype(str)
+    if "sampling_steps" in sample:
+        sample["sampling_steps"] = np.asarray(sample["sampling_steps"], dtype=np.int64)
+    if "sampling_late_refine_from_step" in sample:
+        sample["sampling_late_refine_from_step"] = np.asarray(sample["sampling_late_refine_from_step"], dtype=np.int64)
+    if "sampling_late_refine_factor" in sample:
+        sample["sampling_late_refine_factor"] = np.asarray(sample["sampling_late_refine_factor"], dtype=np.int64)
+    if "sampling_linger_step" in sample:
+        sample["sampling_linger_step"] = np.asarray(sample["sampling_linger_step"], dtype=np.int64)
+    if "sampling_linger_count" in sample:
+        sample["sampling_linger_count"] = np.asarray(sample["sampling_linger_count"], dtype=np.int64)
 
     if "original_brick_anchors" in sample or "original_pos" in sample:
         original_brick_anchors = sample.get("original_brick_anchors", sample.get("original_pos"))

@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from geqdiff.data import AtomicDataDict
-from geqdiff.utils import FlowMatchingSampler, FlowMatchingScheduler
+from geqdiff.utils import FlowMatchingHeunSampler, FlowMatchingSampler, FlowMatchingScheduler
 from geqdiff.utils.diffusion import center_pos, compute_reference_mean
 from geqdiff.utils.dipole_utils import (
     combine_shape_irreps,
@@ -74,6 +74,37 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="Number of reverse integration steps. Lower values are faster but coarser.",
+    )
+    parser.add_argument(
+        "--sampler",
+        type=str,
+        default="heun",
+        choices=("heun", "euler"),
+        help="Reverse integrator to use for flow matching. `heun` is slower but usually more accurate.",
+    )
+    parser.add_argument(
+        "--late-refine-from-step",
+        type=int,
+        default=-1,
+        help="If >= 0, subdivide all reverse intervals from this discrete scheduler step downward.",
+    )
+    parser.add_argument(
+        "--late-refine-factor",
+        type=int,
+        default=1,
+        help="Subdivision factor for late refinement. 1 disables it.",
+    )
+    parser.add_argument(
+        "--linger-step",
+        type=int,
+        default=-1,
+        help="Experimental: discrete scheduler step at which to apply extra frozen-tau micro-steps before continuing.",
+    )
+    parser.add_argument(
+        "--linger-count",
+        type=int,
+        default=0,
+        help="Experimental number of extra frozen-tau micro-steps to apply at --linger-step.",
     )
     parser.add_argument(
         "--save-intermediates",
@@ -383,6 +414,73 @@ def _trajectory_snapshot(
     return snapshot
 
 
+def _build_sampling_schedule(
+    sampler: FlowMatchingSampler,
+    *,
+    steps: int,
+    late_refine_from_step: int,
+    late_refine_factor: int,
+    linger_step: int,
+    linger_count: int,
+) -> List[Dict[str, float | int | str]]:
+    if steps < 1:
+        raise ValueError("--steps must be >= 1.")
+    if late_refine_factor < 1:
+        raise ValueError("--late-refine-factor must be >= 1.")
+    if linger_count < 0:
+        raise ValueError("--linger-count must be >= 0.")
+
+    start_step = sampler.T - 1
+    time_edges = np.linspace(0, start_step, num=steps + 1, dtype=int)[::-1].copy()
+    schedule: List[Dict[str, float | int | str]] = []
+
+    for edge_index in range(steps):
+        t = int(time_edges[edge_index])
+        t_prev_edge = int(time_edges[edge_index + 1])
+        tau_t = float(sampler.scheduler.tau[t].item())
+        tau_prev = float(sampler.scheduler.tau[t_prev_edge].item()) if t_prev_edge > 0 else 0.0
+
+        if linger_step >= 0 and linger_count > 0 and t == linger_step:
+            linger_edges = np.linspace(tau_t, tau_prev, num=linger_count + 2, dtype=np.float32)
+            for sub_index in range(linger_count + 1):
+                next_tau = float(linger_edges[sub_index + 1])
+                schedule.append(
+                    {
+                        "tau": tau_t,
+                        "tau_next": next_tau,
+                        "scheduler_step": t,
+                        "next_scheduler_step": (t_prev_edge if sub_index == linger_count else t),
+                        "mode": "linger" if sub_index < linger_count else "base",
+                    }
+                )
+            continue
+
+        refine_factor = late_refine_factor if (late_refine_from_step >= 0 and late_refine_factor > 1 and t <= late_refine_from_step) else 1
+        if refine_factor > 1:
+            refine_edges = np.linspace(tau_t, tau_prev, num=refine_factor + 1, dtype=np.float32)
+            for sub_index in range(refine_factor):
+                schedule.append(
+                    {
+                        "tau": float(refine_edges[sub_index]),
+                        "tau_next": float(refine_edges[sub_index + 1]),
+                        "scheduler_step": t,
+                        "next_scheduler_step": t_prev_edge if sub_index == refine_factor - 1 else t,
+                        "mode": "refine",
+                    }
+                )
+        else:
+            schedule.append(
+                {
+                    "tau": tau_t,
+                    "tau_next": tau_prev,
+                    "scheduler_step": t,
+                    "next_scheduler_step": t_prev_edge,
+                    "mode": "base",
+                }
+            )
+    return schedule
+
+
 def initial_masked_state(
     example: Dict[str, np.ndarray],
     generator: torch.Generator,
@@ -470,6 +568,89 @@ def initial_masked_state(
     }
 
 
+def _build_model_input(
+    state: Dict[str, torch.Tensor],
+    *,
+    batch: torch.Tensor,
+    node_types: torch.Tensor,
+    rotations: torch.Tensor,
+    tau_value: float,
+    r_max: float,
+    device: torch.device,
+) -> Dict[str, torch.Tensor]:
+    ligand_mask_column = state["ligand_mask"].unsqueeze(-1)
+    tau = torch.full((1, 1), float(tau_value), device=device, dtype=torch.float32)
+    edge_index = build_edge_index(state["pos"], cutoff=r_max)
+    return {
+        AtomicDataDict.POSITIONS_KEY: state["pos"],
+        AtomicDataDict.NODE_TYPE_KEY: node_types,
+        AtomicDataDict.BATCH_KEY: batch,
+        AtomicDataDict.EDGE_INDEX_KEY: edge_index,
+        AtomicDataDict.T_SAMPLED_KEY: tau,
+        AtomicDataDict.SHAPE_SCALAR_FEATURES_KEY: state["shape_scalar_features"],
+        AtomicDataDict.SHAPE_EQUIV_FEATURES_KEY: state["shape_equiv_features"],
+        AtomicDataDict.DIPOLE_STRENGTH_KEY: state["dipole_strength"],
+        AtomicDataDict.DIPOLE_DIRECTION_KEY: state["dipole_direction"],
+        AtomicDataDict.LIGAND_MASK_KEY: ligand_mask_column.to(dtype=torch.float32),
+        AtomicDataDict.POCKET_MASK_KEY: state["pocket_mask"].unsqueeze(-1).to(dtype=torch.float32),
+        AtomicDataDict.ROTATIONS_KEY: rotations,
+    }
+
+
+def _apply_state_projection(
+    next_states: Dict[str, torch.Tensor],
+    *,
+    project_normalized_states: bool,
+) -> Dict[str, torch.Tensor]:
+    projected = dict(next_states)
+    if project_normalized_states:
+        projected["shape_equiv_features"] = _project_shape_equiv(projected["shape_equiv_features"])
+        projected["dipole_direction"] = _project_dipole_direction(projected["dipole_direction"])
+    return projected
+
+
+def _merge_ligand_updates(
+    state: Dict[str, torch.Tensor],
+    next_states: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    ligand_mask_column = state["ligand_mask"].unsqueeze(-1)
+    merged = dict(state)
+    merged["pos"] = torch.where(ligand_mask_column, next_states["pos"], state["pos_fixed"])
+    merged["shape_scalar_features"] = torch.where(ligand_mask_column, next_states["shape_scalar_features"], state["shape_scalar_fixed"])
+    merged["shape_equiv_features"] = torch.where(ligand_mask_column, next_states["shape_equiv_features"], state["shape_equiv_fixed"])
+    merged["dipole_strength"] = torch.where(ligand_mask_column, next_states["dipole_strength"], state["dipole_strength_fixed"])
+    merged["dipole_direction"] = torch.where(ligand_mask_column, next_states["dipole_direction"], state["dipole_direction_fixed"])
+    return merged
+
+
+def _euler_candidate_states(
+    state: Dict[str, torch.Tensor],
+    *,
+    sampler: FlowMatchingSampler,
+    tau_t: float,
+    tau_prev: float,
+    output: Dict[str, torch.Tensor],
+    corrupt_field_map: Dict[str, str],
+) -> Dict[str, torch.Tensor]:
+    dtau = sampler.dtau_from_values(x_t=state["pos"], tau_t=tau_t, tau_prev=tau_prev)
+    next_states = {
+        "pos": state["pos"],
+        "shape_scalar_features": state["shape_scalar_features"],
+        "shape_equiv_features": state["shape_equiv_features"],
+        "dipole_strength": state["dipole_strength"],
+        "dipole_direction": state["dipole_direction"],
+    }
+    for field_name, out_field in STATE_FIELD_SPECS:
+        if field_name not in corrupt_field_map:
+            continue
+        if out_field not in output:
+            raise KeyError(
+                f"Checkpoint declares corrupt field '{field_name}' but model output is missing '{out_field}'."
+            )
+        next_states[field_name] = state[field_name] + dtau * output[out_field]
+    return next_states
+
+
 @torch.no_grad()
 def sample_example(
     model: torch.nn.Module,
@@ -487,6 +668,11 @@ def sample_example(
     project_normalized_states: bool,
     corrupt_field_map: Dict[str, str],
     save_intermediates: bool,
+    sampler_name: str,
+    late_refine_from_step: int,
+    late_refine_factor: int,
+    linger_step: int,
+    linger_count: int,
 ) -> Dict[str, np.ndarray]:
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
@@ -501,20 +687,22 @@ def sample_example(
         position_noise_center_mask_field=position_noise_center_mask_field,
         corrupt_field_map=corrupt_field_map,
     )
-    ligand_mask = state["ligand_mask"]
-    ligand_mask_column = ligand_mask.unsqueeze(-1)
     batch = torch.zeros((int(example["num_nodes"]),), dtype=torch.long, device=device)
     node_types = torch.as_tensor(example["node_types"], dtype=torch.long, device=device).unsqueeze(-1)
     rotations = torch.as_tensor(example["rotations"], dtype=torch.float32, device=device)
 
-    if steps < 1:
-        raise ValueError("--steps must be >= 1.")
-    start_step = sampler.T - 1
-    time_steps = np.linspace(0, start_step, num=steps, dtype=int)[::-1].copy()
+    schedule = _build_sampling_schedule(
+        sampler,
+        steps=steps,
+        late_refine_from_step=late_refine_from_step,
+        late_refine_factor=late_refine_factor,
+        linger_step=linger_step,
+        linger_count=linger_count,
+    )
     trajectory: List[Dict[str, np.ndarray]] = []
 
     if save_intermediates:
-        initial_t = int(time_steps[0])
+        initial_stage = schedule[0]
         trajectory.append(
             _trajectory_snapshot(
                 state,
@@ -522,64 +710,92 @@ def sample_example(
                 scalar_normalization,
                 stage_index=0,
                 stage_label="noise",
-                scheduler_step=initial_t,
-                tau=float(sampler.scheduler.tau[initial_t].item()),
+                scheduler_step=int(initial_stage["scheduler_step"]),
+                tau=float(initial_stage["tau"]),
             )
         )
 
-    for step_idx, t in enumerate(time_steps):
-        t_prev = int(time_steps[step_idx + 1]) if step_idx < len(time_steps) - 1 else -1
-        tau = torch.full((1, 1), float(sampler.scheduler.tau[int(t)].item()), device=device, dtype=torch.float32)
-        edge_index = build_edge_index(state["pos"], cutoff=r_max)
-        batch_input = {
-            AtomicDataDict.POSITIONS_KEY: state["pos"],
-            AtomicDataDict.NODE_TYPE_KEY: node_types,
-            AtomicDataDict.BATCH_KEY: batch,
-            AtomicDataDict.EDGE_INDEX_KEY: edge_index,
-            AtomicDataDict.T_SAMPLED_KEY: tau,
-            AtomicDataDict.SHAPE_SCALAR_FEATURES_KEY: state["shape_scalar_features"],
-            AtomicDataDict.SHAPE_EQUIV_FEATURES_KEY: state["shape_equiv_features"],
-            AtomicDataDict.DIPOLE_STRENGTH_KEY: state["dipole_strength"],
-            AtomicDataDict.DIPOLE_DIRECTION_KEY: state["dipole_direction"],
-            AtomicDataDict.LIGAND_MASK_KEY: ligand_mask_column.to(dtype=torch.float32),
-            AtomicDataDict.POCKET_MASK_KEY: state["pocket_mask"].unsqueeze(-1).to(dtype=torch.float32),
-            AtomicDataDict.ROTATIONS_KEY: rotations,
-        }
+    for step_idx, stage in enumerate(schedule):
+        t = int(stage["scheduler_step"])
+        t_prev_edge = int(stage["next_scheduler_step"])
+        tau_value = float(stage["tau"])
+        tau_next_value = float(stage["tau_next"])
+        batch_input = _build_model_input(
+            state,
+            batch=batch,
+            node_types=node_types,
+            rotations=rotations,
+            tau_value=tau_value,
+            r_max=r_max,
+            device=device,
+        )
         output = model(batch_input)
+        euler_states = _euler_candidate_states(
+            state,
+            sampler=sampler,
+            tau_t=tau_value,
+            tau_prev=tau_next_value,
+            output=output,
+            corrupt_field_map=corrupt_field_map,
+        )
 
-        next_states = {
-            "pos": state["pos"],
-            "shape_scalar_features": state["shape_scalar_features"],
-            "shape_equiv_features": state["shape_equiv_features"],
-            "dipole_strength": state["dipole_strength"],
-            "dipole_direction": state["dipole_direction"],
-        }
-        for field_name, out_field in STATE_FIELD_SPECS:
-            if field_name not in corrupt_field_map:
-                continue
-            if out_field not in output:
-                raise KeyError(
-                    f"Checkpoint declares corrupt field '{field_name}' but model output is missing '{out_field}'."
+        if sampler_name == "heun" and tau_next_value < tau_value - 1e-12:
+            provisional_state = _merge_ligand_updates(
+                state,
+                _apply_state_projection(
+                    euler_states,
+                    project_normalized_states=project_normalized_states,
+                ),
+            )
+            batch_input_next = _build_model_input(
+                provisional_state,
+                batch=batch,
+                node_types=node_types,
+                rotations=rotations,
+                tau_value=tau_next_value,
+                r_max=r_max,
+                device=device,
+            )
+            output_next = model(batch_input_next)
+            next_states = {
+                "pos": state["pos"],
+                "shape_scalar_features": state["shape_scalar_features"],
+                "shape_equiv_features": state["shape_equiv_features"],
+                "dipole_strength": state["dipole_strength"],
+                "dipole_direction": state["dipole_direction"],
+            }
+            for field_name, out_field in STATE_FIELD_SPECS:
+                if field_name not in corrupt_field_map:
+                    continue
+                if out_field not in output_next:
+                    raise KeyError(
+                        f"Checkpoint declares corrupt field '{field_name}' but model output is missing '{out_field}' on Heun correction."
+                    )
+                next_states[field_name] = sampler.step_tau(
+                    state[field_name],
+                    tau_t=tau_value,
+                    tau_prev=tau_next_value,
+                    velocity_pred=output[out_field],
+                    velocity_pred_next=output_next[out_field],
                 )
-            next_states[field_name] = sampler.step(state[field_name], int(t), t_prev, output[out_field])
+        else:
+            next_states = euler_states
 
-        if project_normalized_states:
-            next_states["shape_equiv_features"] = _project_shape_equiv(next_states["shape_equiv_features"])
-            next_states["dipole_direction"] = _project_dipole_direction(next_states["dipole_direction"])
-
-        state["pos"] = torch.where(ligand_mask_column, next_states["pos"], state["pos_fixed"])
-        state["shape_scalar_features"] = torch.where(ligand_mask_column, next_states["shape_scalar_features"], state["shape_scalar_fixed"])
-        state["shape_equiv_features"] = torch.where(ligand_mask_column, next_states["shape_equiv_features"], state["shape_equiv_fixed"])
-        state["dipole_strength"] = torch.where(ligand_mask_column, next_states["dipole_strength"], state["dipole_strength_fixed"])
-        state["dipole_direction"] = torch.where(ligand_mask_column, next_states["dipole_direction"], state["dipole_direction_fixed"])
+        state = _merge_ligand_updates(
+            state,
+            _apply_state_projection(
+                next_states,
+                project_normalized_states=project_normalized_states,
+            ),
+        )
         if save_intermediates:
-            if t_prev >= 0:
-                stage_label = f"step {step_idx + 1}/{len(time_steps)}"
-                tau_value = float(sampler.scheduler.tau[t_prev].item())
-                scheduler_step = int(t_prev)
+            if tau_next_value > 0.0:
+                stage_label = f"step {step_idx + 1}/{len(schedule)}"
+                tau_stage_value = tau_next_value
+                scheduler_step = int(t_prev_edge)
             else:
                 stage_label = "final"
-                tau_value = 0.0
+                tau_stage_value = 0.0
                 scheduler_step = -1
             trajectory.append(
                 _trajectory_snapshot(
@@ -589,7 +805,7 @@ def sample_example(
                     stage_index=step_idx + 1,
                     stage_label=stage_label,
                     scheduler_step=scheduler_step,
-                    tau=tau_value,
+                    tau=tau_stage_value,
                 )
             )
 
@@ -625,6 +841,12 @@ def sample_example(
         "pocket_mask": np.asarray(example["pocket_mask"], dtype=bool),
         "source_frame_id": np.asarray(example["source_frame_id"], dtype=np.int64),
         "split_id": np.asarray(example["split_id"], dtype=np.int64),
+        "sampling_sampler": np.asarray(str(sampler_name)),
+        "sampling_steps": np.asarray(int(steps), dtype=np.int64),
+        "sampling_late_refine_from_step": np.asarray(int(late_refine_from_step), dtype=np.int64),
+        "sampling_late_refine_factor": np.asarray(int(late_refine_factor), dtype=np.int64),
+        "sampling_linger_step": np.asarray(int(linger_step), dtype=np.int64),
+        "sampling_linger_count": np.asarray(int(linger_count), dtype=np.int64),
     }
     if save_intermediates:
         sample["intermediate_states"] = np.asarray(trajectory, dtype=object)
@@ -681,7 +903,10 @@ def main(args: argparse.Namespace | None = None) -> None:
     if tmax is None:
         raise ValueError("Could not determine Tmax from the checkpoint config.")
 
-    sampler = FlowMatchingSampler(FlowMatchingScheduler(T=tmax)).to(args.device)
+    if args.sampler == "heun":
+        sampler = FlowMatchingHeunSampler(FlowMatchingScheduler(T=tmax)).to(args.device)
+    else:
+        sampler = FlowMatchingSampler(FlowMatchingScheduler(T=tmax)).to(args.device)
     model.to(args.device)
     model.eval()
 
@@ -711,6 +936,11 @@ def main(args: argparse.Namespace | None = None) -> None:
             project_normalized_states=project_normalized_states,
             corrupt_field_map=corrupt_field_map,
             save_intermediates=bool(args.save_intermediates),
+            sampler_name=str(args.sampler),
+            late_refine_from_step=int(args.late_refine_from_step),
+            late_refine_factor=int(args.late_refine_factor),
+            linger_step=int(args.linger_step),
+            linger_count=int(args.linger_count),
         )
         sample["conditioning_example_index"] = np.asarray(example_index, dtype=np.int64)
         samples.append(enrich_from_canonical_source(sample, source_samples=source_samples))

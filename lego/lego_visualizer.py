@@ -104,6 +104,12 @@ def parse_args() -> argparse.Namespace:
         help="Compatibility flag that sets the initial target view to `voxels`.",
     )
     parser.add_argument("--output-html", type=Path, default=None, help="Optional HTML output path.")
+    parser.add_argument(
+        "--trajectory-stride",
+        type=int,
+        default=1,
+        help="If intermediate states are present, keep every N-th trajectory frame when building the HTML.",
+    )
     parser.add_argument("--no-show", action="store_true", help="Write the HTML but do not try to open it.")
     return parser.parse_args()
 
@@ -644,9 +650,43 @@ def _sample_meta(sample: Dict) -> Dict[str, int | bool | float | str]:
         meta["shell_thickness"] = float(np.asarray(sample["shell_thickness"]).reshape(-1)[0])
     if "shell_sparsity" in sample:
         meta["shell_sparsity"] = float(np.asarray(sample["shell_sparsity"]).reshape(-1)[0])
+    if "sampling_sampler" in sample:
+        meta["sampling_sampler"] = str(np.asarray(sample["sampling_sampler"]).reshape(-1)[0])
+    if "sampling_steps" in sample:
+        meta["sampling_steps"] = int(np.asarray(sample["sampling_steps"]).reshape(-1)[0])
+    if "sampling_late_refine_from_step" in sample:
+        meta["sampling_late_refine_from_step"] = int(np.asarray(sample["sampling_late_refine_from_step"]).reshape(-1)[0])
+    if "sampling_late_refine_factor" in sample:
+        meta["sampling_late_refine_factor"] = int(np.asarray(sample["sampling_late_refine_factor"]).reshape(-1)[0])
+    if "sampling_linger_step" in sample:
+        meta["sampling_linger_step"] = int(np.asarray(sample["sampling_linger_step"]).reshape(-1)[0])
+    if "sampling_linger_count" in sample:
+        meta["sampling_linger_count"] = int(np.asarray(sample["sampling_linger_count"]).reshape(-1)[0])
     if "intermediate_states" in sample:
         meta["num_intermediate_states"] = int(len(sample["intermediate_states"]))
+    if "trajectory_stride" in sample:
+        meta["trajectory_stride"] = int(np.asarray(sample["trajectory_stride"]).reshape(-1)[0])
     return meta
+
+
+def _apply_trajectory_stride(sample: Dict, stride: int) -> Dict:
+    stride = max(int(stride), 1)
+    if stride <= 1 or "intermediate_states" not in sample:
+        return sample
+
+    raw_states = list(sample.get("intermediate_states", []))
+    if len(raw_states) <= 2:
+        return sample
+
+    selected = raw_states[::stride]
+    if selected[-1] is not raw_states[-1]:
+        selected.append(raw_states[-1])
+
+    updated = dict(sample)
+    updated["intermediate_states"] = selected
+    updated["trajectory_stride"] = np.asarray(stride, dtype=np.int64)
+    updated["original_num_intermediate_states"] = np.asarray(len(raw_states), dtype=np.int64)
+    return updated
 
 
 def _trajectory_state_payloads(sample: Dict) -> List[Dict]:
@@ -1291,8 +1331,34 @@ def _build_html(
       if (Object.prototype.hasOwnProperty.call(state.meta, "occupancy_mode")) {{
         bits.push(`${{state.meta.occupancy_mode}} occupancy`);
       }}
+      if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_sampler")) {{
+        let samplerText = `${{state.meta.sampling_sampler}} sampler`;
+        if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_steps")) {{
+          samplerText += `, ${{state.meta.sampling_steps}} steps`;
+        }}
+        if (
+          Object.prototype.hasOwnProperty.call(state.meta, "sampling_late_refine_factor") &&
+          Number(state.meta.sampling_late_refine_factor) > 1 &&
+          Object.prototype.hasOwnProperty.call(state.meta, "sampling_late_refine_from_step") &&
+          Number(state.meta.sampling_late_refine_from_step) >= 0
+        ) {{
+          samplerText += `, refine<=${{state.meta.sampling_late_refine_from_step}} x${{state.meta.sampling_late_refine_factor}}`;
+        }}
+        if (
+          Object.prototype.hasOwnProperty.call(state.meta, "sampling_linger_count") &&
+          Number(state.meta.sampling_linger_count) > 0 &&
+          Object.prototype.hasOwnProperty.call(state.meta, "sampling_linger_step") &&
+          Number(state.meta.sampling_linger_step) >= 0
+        ) {{
+          samplerText += `, linger@${{state.meta.sampling_linger_step}} +${{state.meta.sampling_linger_count}}`;
+        }}
+        bits.push(samplerText);
+      }}
       if (trajectory.length > 1) {{
         bits.push(`stage ${{formatTrajectoryStage(sampledStage, Number(trajectorySlider.value || "0"), trajectory.length)}}`);
+      }}
+      if (Object.prototype.hasOwnProperty.call(state.meta, "trajectory_stride") && Number(state.meta.trajectory_stride) > 1) {{
+        bits.push(`trajectory stride ${{state.meta.trajectory_stride}}`);
       }}
       const shellDetails = [];
       if (state.meta.occupancy_mode === "shell") {{
@@ -1905,7 +1971,12 @@ def _resolve_output_html(path: Path, output_html: Path | None) -> Path:
 
 def main() -> None:
     args = parse_args()
+    if args.trajectory_stride < 1:
+        raise ValueError("--trajectory-stride must be >= 1.")
+
     samples = load_samples(args.path)
+    if args.trajectory_stride > 1:
+        samples = [_apply_trajectory_stride(sample, args.trajectory_stride) for sample in samples]
     if len(samples) == 0:
         raise ValueError(f"No samples found in {args.path}.")
 
