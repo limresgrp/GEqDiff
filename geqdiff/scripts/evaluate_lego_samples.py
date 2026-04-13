@@ -224,12 +224,12 @@ def _mean(values: List[float]) -> float:
     return float(sum(values) / len(values)) if values else 0.0
 
 
-def main() -> None:
-    args = parse_args()
-    samples = load_samples(args.input)
-    if args.max_samples is not None:
-        samples = samples[: int(args.max_samples)]
-
+def build_evaluation_report(
+    samples: List[Dict[str, Any]],
+    *,
+    large_shift_threshold: float = 1.5,
+    energy_regression_threshold: float = 0.5,
+) -> Dict[str, Any]:
     config = DipoleAssignmentConfig()
     records: List[Dict[str, Any]] = []
     failure_counts: Dict[str, int] = {}
@@ -256,8 +256,8 @@ def main() -> None:
         failures = _failure_labels(
             sampled_eval=sampled_eval,
             compare=compare,
-            large_shift_threshold=float(args.large_shift_threshold),
-            energy_regression_threshold=float(args.energy_regression_threshold),
+            large_shift_threshold=float(large_shift_threshold),
+            energy_regression_threshold=float(energy_regression_threshold),
         )
         record["failures"] = failures
         for label in failures:
@@ -294,9 +294,20 @@ def main() -> None:
     shellness_scores = [float(record["score_card"]["sampled"]["scores"]["shellness"]) for record in records if "score_card" in record]
     dipole_scores = [float(record["score_card"]["sampled"]["scores"]["dipoles"]) for record in records if "score_card" in record]
 
+    parsed_geometries = int(sum(1 for record in records if record["sampled"]["valid_geometry"]))
+    valid_like_geometries = int(
+        sum(
+            1
+            for record in records
+            if bool(record["score_card"]["sampled"]["metrics"].get("is_valid_like", False))
+        )
+    )
+
     summary = {
         "num_samples": int(len(records)),
-        "valid_geometries": int(sum(1 for record in records if record["sampled"]["valid_geometry"])),
+        "parsed_geometries": parsed_geometries,
+        "valid_like_geometries": valid_like_geometries,
+        "valid_geometries": valid_like_geometries,
         "mean_sampled_energy": _mean(sampled_energies),
         "mean_diffused_shift": _mean(diffused_means),
         "mean_energy_delta": _mean(energy_deltas),
@@ -308,11 +319,18 @@ def main() -> None:
         "mean_dipole_score": _mean(dipole_scores),
         "failure_counts": failure_counts,
     }
+    return {"summary": summary, "records": records}
+
+
+def print_evaluation_report(report: Dict[str, Any], *, input_path: Path | str) -> None:
+    summary = report["summary"]
+    records = report["records"]
 
     print("--- LEGO Sample Evaluation ---")
-    print(f"Input: {args.input}")
+    print(f"Input: {input_path}")
     print(f"Samples: {summary['num_samples']}")
-    print(f"Valid geometries: {summary['valid_geometries']}/{summary['num_samples']}")
+    print(f"Parsed geometries: {summary['parsed_geometries']}/{summary['num_samples']}")
+    print(f"Valid-like geometries: {summary['valid_like_geometries']}/{summary['num_samples']}")
     print(f"Mean sampled energy: {summary['mean_sampled_energy']:.3f}")
     print(
         "Mean validity / compactness / shellness / dipole scores: "
@@ -321,17 +339,17 @@ def main() -> None:
         f"{summary['mean_shellness_score']:.2f} / "
         f"{summary['mean_dipole_score']:.2f}"
     )
-    if diffused_means:
+    if summary["mean_diffused_shift"] is not None:
         print(f"Mean diffused-anchor shift: {summary['mean_diffused_shift']:.3f}")
-    if energy_deltas:
+    if summary["mean_energy_delta"] is not None:
         print(f"Mean sampled-original energy delta: {summary['mean_energy_delta']:.3f}")
-    if shape_mses:
+    if summary["mean_shape_mse"] is not None:
         print(f"Mean sampled-original shape MSE: {summary['mean_shape_mse']:.4f}")
-    if dipole_angles:
+    if summary["mean_dipole_direction_angle_deg"] is not None:
         print(f"Mean sampled-original dipole angle: {summary['mean_dipole_direction_angle_deg']:.2f} deg")
-    if failure_counts:
+    if summary["failure_counts"]:
         print("Failures:")
-        for label, count in sorted(failure_counts.items()):
+        for label, count in sorted(summary["failure_counts"].items()):
             print(f"  {label}: {count}")
 
     worst_by_shift = sorted(
@@ -350,10 +368,25 @@ def main() -> None:
                 f"failures={','.join(record['failures']) or 'none'}"
             )
 
+
+def main() -> None:
+    args = parse_args()
+    samples = load_samples(args.input)
+    if args.max_samples is not None:
+        samples = samples[: int(args.max_samples)]
+
+    report = build_evaluation_report(
+        samples,
+        large_shift_threshold=float(args.large_shift_threshold),
+        energy_regression_threshold=float(args.energy_regression_threshold),
+    )
+    summary = report["summary"]
+    print_evaluation_report(report, input_path=args.input)
+
     if args.output_json is not None:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(
-            json.dumps({"summary": summary, "records": records}, indent=2),
+            json.dumps(report, indent=2),
             encoding="utf-8",
         )
         print(f"Saved JSON report to {args.output_json}")

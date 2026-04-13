@@ -392,6 +392,24 @@ def _normalize_sample(sample):
         sample["sampling_linger_step"] = np.asarray(sample["sampling_linger_step"], dtype=np.int64)
     if "sampling_linger_count" in sample:
         sample["sampling_linger_count"] = np.asarray(sample["sampling_linger_count"], dtype=np.int64)
+    if "sampling_clash_guidance" in sample:
+        sample["sampling_clash_guidance"] = np.asarray(sample["sampling_clash_guidance"], dtype=bool)
+    if "sampling_clash_guidance_strength" in sample:
+        sample["sampling_clash_guidance_strength"] = np.asarray(sample["sampling_clash_guidance_strength"], dtype=np.float32)
+    if "sampling_clash_guidance_max_norm" in sample:
+        sample["sampling_clash_guidance_max_norm"] = np.asarray(sample["sampling_clash_guidance_max_norm"], dtype=np.float32)
+    if "sampling_clash_guidance_weight_schedule" in sample:
+        sample["sampling_clash_guidance_weight_schedule"] = np.asarray(sample["sampling_clash_guidance_weight_schedule"]).astype(str)
+    if "sampling_clash_guidance_auto_scale" in sample:
+        sample["sampling_clash_guidance_auto_scale"] = np.asarray(sample["sampling_clash_guidance_auto_scale"], dtype=bool)
+    if "sampling_clash_guidance_auto_scale_min" in sample:
+        sample["sampling_clash_guidance_auto_scale_min"] = np.asarray(sample["sampling_clash_guidance_auto_scale_min"], dtype=np.float32)
+    if "sampling_clash_guidance_auto_scale_max" in sample:
+        sample["sampling_clash_guidance_auto_scale_max"] = np.asarray(sample["sampling_clash_guidance_auto_scale_max"], dtype=np.float32)
+    if "sampling_cohesion_guidance_strength" in sample:
+        sample["sampling_cohesion_guidance_strength"] = np.asarray(sample["sampling_cohesion_guidance_strength"], dtype=np.float32)
+    if "sampling_cohesion_guidance_target_contacts" in sample:
+        sample["sampling_cohesion_guidance_target_contacts"] = np.asarray(sample["sampling_cohesion_guidance_target_contacts"], dtype=np.float32)
 
     if "original_brick_anchors" in sample or "original_pos" in sample:
         original_brick_anchors = sample.get("original_brick_anchors", sample.get("original_pos"))

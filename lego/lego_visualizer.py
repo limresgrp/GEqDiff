@@ -662,6 +662,20 @@ def _sample_meta(sample: Dict) -> Dict[str, int | bool | float | str]:
         meta["sampling_linger_step"] = int(np.asarray(sample["sampling_linger_step"]).reshape(-1)[0])
     if "sampling_linger_count" in sample:
         meta["sampling_linger_count"] = int(np.asarray(sample["sampling_linger_count"]).reshape(-1)[0])
+    if "sampling_clash_guidance" in sample:
+        meta["sampling_clash_guidance"] = bool(np.asarray(sample["sampling_clash_guidance"]).reshape(-1)[0])
+    if "sampling_clash_guidance_strength" in sample:
+        meta["sampling_clash_guidance_strength"] = float(np.asarray(sample["sampling_clash_guidance_strength"]).reshape(-1)[0])
+    if "sampling_clash_guidance_max_norm" in sample:
+        meta["sampling_clash_guidance_max_norm"] = float(np.asarray(sample["sampling_clash_guidance_max_norm"]).reshape(-1)[0])
+    if "sampling_clash_guidance_weight_schedule" in sample:
+        meta["sampling_clash_guidance_weight_schedule"] = str(np.asarray(sample["sampling_clash_guidance_weight_schedule"]).reshape(-1)[0])
+    if "sampling_clash_guidance_auto_scale" in sample:
+        meta["sampling_clash_guidance_auto_scale"] = bool(np.asarray(sample["sampling_clash_guidance_auto_scale"]).reshape(-1)[0])
+    if "sampling_cohesion_guidance_strength" in sample:
+        meta["sampling_cohesion_guidance_strength"] = float(np.asarray(sample["sampling_cohesion_guidance_strength"]).reshape(-1)[0])
+    if "sampling_cohesion_guidance_target_contacts" in sample:
+        meta["sampling_cohesion_guidance_target_contacts"] = float(np.asarray(sample["sampling_cohesion_guidance_target_contacts"]).reshape(-1)[0])
     if "intermediate_states" in sample:
         meta["num_intermediate_states"] = int(len(sample["intermediate_states"]))
     if "trajectory_stride" in sample:
@@ -1351,6 +1365,32 @@ def _build_html(
           Number(state.meta.sampling_linger_step) >= 0
         ) {{
           samplerText += `, linger@${{state.meta.sampling_linger_step}} +${{state.meta.sampling_linger_count}}`;
+        }}
+        if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_clash_guidance")) {{
+          if (state.meta.sampling_clash_guidance) {{
+            let guidanceText = "clash guidance on";
+            if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_clash_guidance_strength")) {{
+              guidanceText += `, s=${{Number(state.meta.sampling_clash_guidance_strength).toFixed(2)}}`;
+            }}
+            if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_clash_guidance_weight_schedule")) {{
+              guidanceText += `, ${{state.meta.sampling_clash_guidance_weight_schedule}}`;
+            }}
+            if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_clash_guidance_auto_scale")) {{
+              guidanceText += state.meta.sampling_clash_guidance_auto_scale ? ", auto-scale" : ", fixed-scale";
+            }}
+            if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_cohesion_guidance_strength")) {{
+              const cgs = Number(state.meta.sampling_cohesion_guidance_strength);
+              if (cgs > 0) {{
+                guidanceText += `, cohesion=${{cgs.toFixed(2)}}`;
+                if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_cohesion_guidance_target_contacts")) {{
+                  guidanceText += `@${{Number(state.meta.sampling_cohesion_guidance_target_contacts).toFixed(1)}}`;
+                }}
+              }}
+            }}
+            bits.push(guidanceText);
+          }} else {{
+            bits.push("clash guidance off");
+          }}
         }}
         bits.push(samplerText);
       }}

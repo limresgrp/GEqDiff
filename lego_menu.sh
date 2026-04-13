@@ -371,11 +371,12 @@ train_lego_model() {
 }
 
 sample_lego_blocks() {
-  local latest_model model_path input_path output_path source_path num_samples steps sampler_name late_refine_from_step late_refine_factor linger_step linger_count device seed indices_raw save_intermediates
+  local latest_model model_path input_path output_path source_path metrics_json num_samples steps sampler_name late_refine_from_step late_refine_factor linger_step linger_count clash_guidance clash_guidance_strength clash_guidance_max_norm clash_guidance_weight_schedule clash_guidance_auto_scale clash_guidance_auto_scale_min clash_guidance_auto_scale_max cohesion_guidance_strength cohesion_guidance_target_contacts save_metrics device seed indices_raw save_intermediates
   latest_model="$(latest_named_file "${RESULTS_ROOT_PATH}" "best_model.pth")"
   model_path="$(prompt_with_default "Checkpoint path" "${latest_model}")"
   input_path="$(prompt_with_default "Input diffusion dataset path" "${DIFFUSION_DATASET_PATH}")"
   output_path="$(prompt_with_default "Output sampled LEGO dataset path" "${SAMPLED_DATASET_PATH}")"
+  metrics_json="$(prompt_with_default "Metrics JSON path (blank for auto next to NPZ)" "")"
   source_path="$(prompt_with_default "Canonical source dataset path (blank to skip enrichment)" "")"
   num_samples="$(prompt_with_default "Number of samples to draw" "4")"
   steps="$(prompt_with_default "Reverse integration steps" "20")"
@@ -384,6 +385,23 @@ sample_lego_blocks() {
   late_refine_factor="$(prompt_with_default "Late refine factor" "1")"
   linger_step="$(prompt_with_default "Experimental linger step (-1 disables)" "-1")"
   linger_count="$(prompt_with_default "Experimental linger count" "0")"
+  if prompt_yes_no "Enable clash guidance?" "y"; then
+    clash_guidance="y"
+  else
+    clash_guidance="n"
+  fi
+  clash_guidance_strength="$(prompt_with_default "Clash guidance strength" "0.05")"
+  clash_guidance_max_norm="$(prompt_with_default "Clash guidance max norm" "1.0")"
+  clash_guidance_weight_schedule="$(prompt_with_default "Clash guidance weight schedule" "late_quadratic")"
+  cohesion_guidance_strength="$(prompt_with_default "Cohesion guidance strength" "0.0")"
+  cohesion_guidance_target_contacts="$(prompt_with_default "Cohesion target contacts" "1.5")"
+  if prompt_yes_no "Auto-scale clash guidance to model velocity?" "y"; then
+    clash_guidance_auto_scale="y"
+  else
+    clash_guidance_auto_scale="n"
+  fi
+  clash_guidance_auto_scale_min="$(prompt_with_default "Clash guidance auto-scale min" "0.2")"
+  clash_guidance_auto_scale_max="$(prompt_with_default "Clash guidance auto-scale max" "5.0")"
   device="$(prompt_with_default "Device" "cuda:0")"
   seed="$(prompt_with_default "Random seed" "0")"
   indices_raw="$(prompt_with_default "Explicit diffusion example indices (space-separated, blank for random)" "")"
@@ -391,6 +409,11 @@ sample_lego_blocks() {
     save_intermediates="y"
   else
     save_intermediates="n"
+  fi
+  if prompt_yes_no "Save evaluation metrics JSON?" "y"; then
+    save_metrics="y"
+  else
+    save_metrics="n"
   fi
 
   if ! confirm_overwrite "${output_path}"; then
@@ -411,9 +434,26 @@ sample_lego_blocks() {
     --late-refine-factor "${late_refine_factor}"
     --linger-step "${linger_step}"
     --linger-count "${linger_count}"
+    --clash-guidance-strength "${clash_guidance_strength}"
+    --clash-guidance-max-norm "${clash_guidance_max_norm}"
+    --clash-guidance-weight-schedule "${clash_guidance_weight_schedule}"
+    --clash-guidance-auto-scale-min "${clash_guidance_auto_scale_min}"
+    --clash-guidance-auto-scale-max "${clash_guidance_auto_scale_max}"
+    --cohesion-guidance-strength "${cohesion_guidance_strength}"
+    --cohesion-guidance-target-contacts "${cohesion_guidance_target_contacts}"
     --device "${device}"
     --seed "${seed}"
   )
+  if [[ "${clash_guidance}" == "y" ]]; then
+    cmd+=(--clash-guidance)
+  else
+    cmd+=(--no-clash-guidance)
+  fi
+  if [[ "${clash_guidance_auto_scale}" == "y" ]]; then
+    cmd+=(--clash-guidance-auto-scale)
+  else
+    cmd+=(--no-clash-guidance-auto-scale)
+  fi
   if [[ -n "${source_path}" ]]; then
     cmd+=(--source-canonical "${source_path}")
   fi
@@ -424,6 +464,14 @@ sample_lego_blocks() {
   fi
   if [[ "${save_intermediates}" == "y" ]]; then
     cmd+=(--save-intermediates)
+  fi
+  if [[ "${save_metrics}" == "y" ]]; then
+    cmd+=(--save-metrics)
+  else
+    cmd+=(--no-save-metrics)
+  fi
+  if [[ -n "${metrics_json}" ]]; then
+    cmd+=(--metrics-json "${metrics_json}")
   fi
 
   if run_cmd "${cmd[@]}"; then
