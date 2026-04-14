@@ -67,6 +67,36 @@ def _combine_shape_irreps_torch(
     return torch.cat([l0, l1, l2, l3], dim=-1)
 
 
+def _compose_shape_equiv_velocity_from_scalar(
+    shape_scalar_velocity: torch.Tensor,
+    shape_equiv_velocity: torch.Tensor,
+    clamp_nonnegative: bool = True,
+) -> torch.Tensor:
+    if shape_scalar_velocity.shape[-1] < 4 or shape_equiv_velocity.shape[-1] != 15:
+        return shape_equiv_velocity
+    composed = shape_equiv_velocity.clone()
+    block_specs = ((1, 0, 3), (2, 3, 8), (3, 8, 15))
+    for scalar_idx, start, stop in block_specs:
+        scale = shape_scalar_velocity[..., scalar_idx : scalar_idx + 1]
+        if clamp_nonnegative:
+            scale = torch.clamp(scale, min=0.0)
+        composed[..., start:stop] = shape_equiv_velocity[..., start:stop] * scale
+    return composed
+
+
+def _compose_dipole_direction_velocity_from_strength(
+    dipole_strength_velocity: torch.Tensor,
+    dipole_direction_velocity: torch.Tensor,
+    clamp_nonnegative: bool = True,
+) -> torch.Tensor:
+    if dipole_strength_velocity.shape[-1] < 1 or dipole_direction_velocity.shape[-1] != 3:
+        return dipole_direction_velocity
+    scale = dipole_strength_velocity[..., 0:1]
+    if clamp_nonnegative:
+        scale = torch.clamp(scale, min=0.0)
+    return dipole_direction_velocity * scale
+
+
 class DiffusionWeightedCrossEntropyLoss:
     """
     Cross-entropy with per-sample weights derived from diffusion or flow-time
@@ -815,6 +845,8 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         magnitude_floor: float = 0.0,
         include_ligand_ligand: bool = True,
         include_ligand_pocket: bool = True,
+        compose_directional_velocity: bool = False,
+        compose_nonnegative_scale: bool = True,
         label: Optional[str] = None,
         **kwargs,
     ):
@@ -828,6 +860,8 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         self.magnitude_floor = float(magnitude_floor)
         self.include_ligand_ligand = bool(include_ligand_ligand)
         self.include_ligand_pocket = bool(include_ligand_pocket)
+        self.compose_directional_velocity = bool(compose_directional_velocity)
+        self.compose_nonnegative_scale = bool(compose_nonnegative_scale)
         self.label = label
         if self.pair_cutoff <= 0.0:
             raise ValueError("pair_cutoff must be > 0.")
@@ -1022,6 +1056,13 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         sigma = sigma.to(device=pos_t.device, dtype=pos_t.dtype)
         sigma = self._expand_graph_tensor(sigma, batch=batch, target_dim=1).to(dtype=pos_t.dtype).reshape(-1, 1)
 
+        if self.compose_directional_velocity:
+            shape_equiv_velocity = _compose_shape_equiv_velocity_from_scalar(
+                shape_scalar_velocity,
+                shape_equiv_velocity,
+                clamp_nonnegative=self.compose_nonnegative_scale,
+            )
+
         pred_pos_0 = pos_t - sigma * velocity
         pred_shape_scalar = shape_scalar_t - sigma * shape_scalar_velocity
         pred_shape_equiv = shape_equiv_t - sigma * shape_equiv_velocity
@@ -1073,6 +1114,8 @@ class MaskedBrickLibraryMetric(MaskedLossWrapper):
         self,
         metric: str = "distance",
         type_names: Optional[Sequence[str]] = None,
+        compose_directional_velocity: bool = False,
+        compose_nonnegative_scale: bool = True,
         label: Optional[str] = None,
         **kwargs,
     ):
@@ -1081,6 +1124,8 @@ class MaskedBrickLibraryMetric(MaskedLossWrapper):
             raise ValueError("metric must be one of: 'distance', 'type_accuracy'.")
         self.metric = str(metric)
         self.type_names = None if type_names is None else [str(name) for name in type_names]
+        self.compose_directional_velocity = bool(compose_directional_velocity)
+        self.compose_nonnegative_scale = bool(compose_nonnegative_scale)
         self.label = label
         self._warned_missing_decode_inputs = False
 
@@ -1204,6 +1249,13 @@ class MaskedBrickLibraryMetric(MaskedLossWrapper):
             if mean:
                 return torch.zeros((), device=reference.device, dtype=reference.dtype)
             return reference.new_empty((0,), dtype=reference.dtype)
+
+        if self.compose_directional_velocity:
+            shape_equiv_velocity = _compose_shape_equiv_velocity_from_scalar(
+                shape_scalar_velocity,
+                shape_equiv_velocity,
+                clamp_nonnegative=self.compose_nonnegative_scale,
+            )
 
         sigma = sigma.reshape(-1, 1)
         pred_shape_scalar_norm = shape_scalar_t - sigma * shape_scalar_velocity

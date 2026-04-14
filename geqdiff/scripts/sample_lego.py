@@ -131,7 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--clash-guidance",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Apply optional clash guidance from the predicted final structure during reverse integration.",
     )
     parser.add_argument(
@@ -156,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--clash-guidance-auto-scale",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Automatically scale guidance relative to the model velocity magnitude on each step.",
     )
     parser.add_argument(
@@ -358,6 +358,64 @@ def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
 def infer_corrupt_field_map(config: Dict) -> Dict[str, str]:
     settings = infer_corrupt_field_settings(config)
     return {field_name: str(spec["out_field"]) for field_name, spec in settings.items()}
+
+
+def infer_directional_velocity_couplings(config: Dict) -> List[Dict[str, Any]]:
+    model_cfg = config.get("model", {})
+    stack = model_cfg.get("stack", [])
+    if not (isinstance(stack, list) and len(stack) > 0 and isinstance(stack[0], dict)):
+        return []
+
+    flow_cfg = stack[0]
+    couplings = flow_cfg.get("directional_velocity_couplings", [])
+    if not isinstance(couplings, list):
+        return []
+
+    parsed: List[Dict[str, Any]] = []
+    for idx, coupling in enumerate(couplings):
+        if not isinstance(coupling, dict):
+            continue
+        scalar_out_field = str(coupling.get("scalar_out_field", ""))
+        equiv_out_field = str(coupling.get("equiv_out_field", ""))
+        block_pairs = coupling.get("block_pairs", [])
+        if scalar_out_field == "" or equiv_out_field == "" or not isinstance(block_pairs, list):
+            continue
+
+        scalar_indices: List[int] = []
+        equiv_starts: List[int] = []
+        equiv_stops: List[int] = []
+        for block_idx, block in enumerate(block_pairs):
+            if not isinstance(block, dict):
+                continue
+            scalar_index = int(block.get("scalar_index", -1))
+            equiv_slice = block.get("equiv_slice", None)
+            if scalar_index < 0 or not isinstance(equiv_slice, (list, tuple)) or len(equiv_slice) != 2:
+                raise ValueError(
+                    f"Invalid directional_velocity_couplings[{idx}].block_pairs[{block_idx}] entry."
+                )
+            start = int(equiv_slice[0])
+            stop = int(equiv_slice[1])
+            if stop <= start:
+                raise ValueError(
+                    f"Invalid equiv_slice [{start}, {stop}] in directional_velocity_couplings[{idx}]."
+                )
+            scalar_indices.append(scalar_index)
+            equiv_starts.append(start)
+            equiv_stops.append(stop)
+
+        if len(scalar_indices) == 0:
+            continue
+        parsed.append(
+            {
+                "scalar_out_field": scalar_out_field,
+                "equiv_out_field": equiv_out_field,
+                "scalar_indices": scalar_indices,
+                "equiv_starts": equiv_starts,
+                "equiv_stops": equiv_stops,
+                "nonnegative_scale": bool(coupling.get("nonnegative_scale", True)),
+            }
+        )
+    return parsed
 
 
 def build_edge_index(positions: torch.Tensor, cutoff: float) -> torch.Tensor:
@@ -723,15 +781,53 @@ def _apply_state_projection(
     return projected
 
 
+def _compose_directional_velocity_outputs(
+    output: Dict[str, torch.Tensor],
+    couplings: Sequence[Dict[str, Any]],
+) -> Dict[str, torch.Tensor]:
+    if len(couplings) == 0:
+        return output
+    composed = dict(output)
+    for coupling in couplings:
+        scalar_out_field = str(coupling["scalar_out_field"])
+        equiv_out_field = str(coupling["equiv_out_field"])
+        if scalar_out_field not in composed or equiv_out_field not in composed:
+            continue
+        scalar_values = composed[scalar_out_field]
+        equiv_values = composed[equiv_out_field]
+        updated_equiv = equiv_values.clone()
+        scalar_indices = coupling["scalar_indices"]
+        equiv_starts = coupling["equiv_starts"]
+        equiv_stops = coupling["equiv_stops"]
+        nonnegative_scale = bool(coupling.get("nonnegative_scale", True))
+        for block_idx in range(len(scalar_indices)):
+            scalar_index = int(scalar_indices[block_idx])
+            start = int(equiv_starts[block_idx])
+            stop = int(equiv_stops[block_idx])
+            direction = equiv_values[..., start:stop]
+            scale = scalar_values[..., scalar_index : scalar_index + 1]
+            if nonnegative_scale:
+                scale = torch.clamp(scale, min=0.0)
+            updated_equiv[..., start:stop] = direction * scale
+        composed[equiv_out_field] = updated_equiv
+    return composed
+
+
 def _merge_ligand_updates(
     state: Dict[str, torch.Tensor],
     next_states: Dict[str, torch.Tensor],
 ) -> Dict[str, torch.Tensor]:
     ligand_mask_column = state["ligand_mask"].unsqueeze(-1)
     merged = dict(state)
+    shape_scalar_fixed = state.get("shape_scalar_features_fixed", state.get("shape_scalar_fixed"))
+    shape_equiv_fixed = state.get("shape_equiv_features_fixed", state.get("shape_equiv_fixed"))
+    if shape_scalar_fixed is None:
+        raise KeyError("Missing fixed state for shape_scalar_features.")
+    if shape_equiv_fixed is None:
+        raise KeyError("Missing fixed state for shape_equiv_features.")
     merged["pos"] = torch.where(ligand_mask_column, next_states["pos"], state["pos_fixed"])
-    merged["shape_scalar_features"] = torch.where(ligand_mask_column, next_states["shape_scalar_features"], state["shape_scalar_fixed"])
-    merged["shape_equiv_features"] = torch.where(ligand_mask_column, next_states["shape_equiv_features"], state["shape_equiv_fixed"])
+    merged["shape_scalar_features"] = torch.where(ligand_mask_column, next_states["shape_scalar_features"], shape_scalar_fixed)
+    merged["shape_equiv_features"] = torch.where(ligand_mask_column, next_states["shape_equiv_features"], shape_equiv_fixed)
     merged["dipole_strength"] = torch.where(ligand_mask_column, next_states["dipole_strength"], state["dipole_strength_fixed"])
     merged["dipole_direction"] = torch.where(ligand_mask_column, next_states["dipole_direction"], state["dipole_direction_fixed"])
     return merged
@@ -1085,6 +1181,7 @@ def sample_example(
     project_normalized_states: bool,
     corrupt_field_map: Dict[str, str],
     corrupt_field_settings: Dict[str, Dict[str, Any]],
+    directional_velocity_couplings: Sequence[Dict[str, Any]],
     save_intermediates: bool,
     sampler_name: str,
     late_refine_from_step: int,
@@ -1154,7 +1251,10 @@ def sample_example(
             device=device,
         )
         output = _apply_clash_guidance(
-            model(batch_input),
+            _compose_directional_velocity_outputs(
+                model(batch_input),
+                couplings=directional_velocity_couplings,
+            ),
             state,
             tau_value=tau_value,
             guidance_enabled=clash_guidance,
@@ -1194,7 +1294,10 @@ def sample_example(
                 device=device,
             )
             output_next = _apply_clash_guidance(
-                model(batch_input_next),
+                _compose_directional_velocity_outputs(
+                    model(batch_input_next),
+                    couplings=directional_velocity_couplings,
+                ),
                 provisional_state,
                 tau_value=tau_next_value,
                 guidance_enabled=clash_guidance,
@@ -1349,6 +1452,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     project_normalized_states = infer_project_normalized_states(config)
     corrupt_field_settings = infer_corrupt_field_settings(config)
     corrupt_field_map = infer_corrupt_field_map(config)
+    directional_velocity_couplings = infer_directional_velocity_couplings(config)
 
     try:
         r_max = float(config[AtomicDataDict.R_MAX_KEY])
@@ -1388,6 +1492,7 @@ def main(args: argparse.Namespace | None = None) -> None:
             project_normalized_states=project_normalized_states,
             corrupt_field_map=corrupt_field_map,
             corrupt_field_settings=corrupt_field_settings,
+            directional_velocity_couplings=directional_velocity_couplings,
             save_intermediates=bool(args.save_intermediates),
             sampler_name=str(args.sampler),
             late_refine_from_step=int(args.late_refine_from_step),

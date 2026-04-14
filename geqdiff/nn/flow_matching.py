@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import List, Optional
 
 import torch
@@ -25,6 +25,12 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
     noise_center_mask_fields: List[str]
     mask_fields: List[str]
     unmasked_noise_scales: List[float]
+    directional_scalar_out_fields: List[str]
+    directional_equiv_out_fields: List[str]
+    directional_scalar_indices: List[List[int]]
+    directional_equiv_starts: List[List[int]]
+    directional_equiv_stops: List[List[int]]
+    directional_nonnegative_scale: List[bool]
 
     def __init__(
         self,
@@ -46,6 +52,8 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
         flow_scheduler=FlowMatchingScheduler,
         flow_scheduler_kwargs=None,
         use_aot: bool = False,
+        directional_velocity_couplings: Optional[List[dict]] = None,
+        directional_velocity_eps: float = 1e-8,
         irreps_in=None,
     ):
         super().__init__()
@@ -149,6 +157,9 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
         self.use_aot = use_aot
         if self.use_aot and linear_sum_assignment is None:
             raise ImportError("scipy is required to use AOT. Please install it: `pip install scipy`")
+        self.directional_velocity_eps = float(directional_velocity_eps)
+        if self.directional_velocity_eps <= 0.0:
+            raise ValueError("directional_velocity_eps must be > 0.")
 
         if t_embedder_kwargs is None:
             t_embedder_kwargs = {}
@@ -157,6 +168,14 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
 
         self.t_embedder = t_embedder(**t_embedder_kwargs)
         self.flow_scheduler = flow_scheduler(T=self.T, **flow_scheduler_kwargs)
+
+        self.directional_scalar_out_fields = []
+        self.directional_equiv_out_fields = []
+        self.directional_scalar_indices = []
+        self.directional_equiv_starts = []
+        self.directional_equiv_stops = []
+        self.directional_nonnegative_scale = []
+        self._parse_directional_velocity_couplings(directional_velocity_couplings)
 
         conditioning_dim = self.t_embedder.embedding_dim
         self._init_irreps(
@@ -169,6 +188,127 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
             },
         )
         register_fields(graph_fields=[self.num_atoms_field])
+
+    def _parse_directional_velocity_couplings(self, couplings: Optional[List[dict]]) -> None:
+        if couplings is None:
+            return
+        if not isinstance(couplings, Sequence) or isinstance(couplings, (str, bytes)):
+            raise TypeError("directional_velocity_couplings must be a list of mappings.")
+
+        known_out_fields = set(self.out_fields)
+        for idx, coupling in enumerate(list(couplings)):
+            if not isinstance(coupling, Mapping):
+                raise TypeError(f"directional_velocity_couplings[{idx}] must be a mapping.")
+            scalar_out_field = str(coupling.get("scalar_out_field", ""))
+            equiv_out_field = str(coupling.get("equiv_out_field", ""))
+            if scalar_out_field == "" or equiv_out_field == "":
+                raise ValueError(
+                    f"directional_velocity_couplings[{idx}] must define both scalar_out_field and equiv_out_field."
+                )
+            if scalar_out_field not in known_out_fields:
+                raise ValueError(
+                    f"directional_velocity_couplings[{idx}] references unknown scalar_out_field '{scalar_out_field}'. "
+                    f"Known outputs: {sorted(known_out_fields)}"
+                )
+            if equiv_out_field not in known_out_fields:
+                raise ValueError(
+                    f"directional_velocity_couplings[{idx}] references unknown equiv_out_field '{equiv_out_field}'. "
+                    f"Known outputs: {sorted(known_out_fields)}"
+                )
+
+            block_pairs = coupling.get("block_pairs", [])
+            if (
+                not isinstance(block_pairs, Sequence)
+                or isinstance(block_pairs, (str, bytes))
+                or len(block_pairs) == 0
+            ):
+                raise ValueError(
+                    f"directional_velocity_couplings[{idx}] must provide a non-empty block_pairs list."
+                )
+            scalar_indices: List[int] = []
+            equiv_starts: List[int] = []
+            equiv_stops: List[int] = []
+            for block_idx, block in enumerate(list(block_pairs)):
+                if not isinstance(block, Mapping):
+                    raise TypeError(
+                        f"directional_velocity_couplings[{idx}].block_pairs[{block_idx}] must be a mapping."
+                    )
+                scalar_index = int(block.get("scalar_index", -1))
+                equiv_slice = block.get("equiv_slice", None)
+                if (
+                    not isinstance(equiv_slice, Sequence)
+                    or isinstance(equiv_slice, (str, bytes))
+                    or len(equiv_slice) != 2
+                ):
+                    raise ValueError(
+                        f"directional_velocity_couplings[{idx}].block_pairs[{block_idx}] must define "
+                        f"equiv_slice: [start, stop]."
+                    )
+                start = int(equiv_slice[0])
+                stop = int(equiv_slice[1])
+                if scalar_index < 0:
+                    raise ValueError(
+                        f"directional_velocity_couplings[{idx}].block_pairs[{block_idx}] has invalid scalar_index "
+                        f"{scalar_index}."
+                    )
+                if stop <= start:
+                    raise ValueError(
+                        f"directional_velocity_couplings[{idx}].block_pairs[{block_idx}] has invalid equiv_slice "
+                        f"[{start}, {stop}]."
+                    )
+                scalar_indices.append(scalar_index)
+                equiv_starts.append(start)
+                equiv_stops.append(stop)
+
+            nonnegative_scale = bool(coupling.get("nonnegative_scale", True))
+            self.directional_scalar_out_fields.append(scalar_out_field)
+            self.directional_equiv_out_fields.append(equiv_out_field)
+            self.directional_scalar_indices.append(scalar_indices)
+            self.directional_equiv_starts.append(equiv_starts)
+            self.directional_equiv_stops.append(equiv_stops)
+            self.directional_nonnegative_scale.append(nonnegative_scale)
+
+    def _apply_directional_velocity_target_couplings(self, data: AtomicDataDict.Type) -> None:
+        num_couplings = len(self.directional_scalar_out_fields)
+        if num_couplings == 0:
+            return
+
+        for idx in range(num_couplings):
+            scalar_out_field = self.directional_scalar_out_fields[idx]
+            equiv_out_field = self.directional_equiv_out_fields[idx]
+            scalar_target_field = scalar_out_field + "_target"
+            equiv_target_field = equiv_out_field + "_target"
+            if scalar_target_field not in data or equiv_target_field not in data:
+                continue
+
+            scalar_target = data[scalar_target_field]
+            equiv_target = data[equiv_target_field]
+            scalar_indices = self.directional_scalar_indices[idx]
+            equiv_starts = self.directional_equiv_starts[idx]
+            equiv_stops = self.directional_equiv_stops[idx]
+            nonnegative = self.directional_nonnegative_scale[idx]
+
+            scalar_target_updated = scalar_target.clone()
+            equiv_target_updated = equiv_target.clone()
+            for block_idx in range(len(scalar_indices)):
+                scalar_index = int(scalar_indices[block_idx])
+                start = int(equiv_starts[block_idx])
+                stop = int(equiv_stops[block_idx])
+                block = equiv_target_updated[..., start:stop]
+                norms = torch.linalg.norm(block, dim=-1, keepdim=True)
+                normalized = torch.where(
+                    norms > self.directional_velocity_eps,
+                    block / torch.clamp(norms, min=self.directional_velocity_eps),
+                    torch.zeros_like(block),
+                )
+                equiv_target_updated[..., start:stop] = normalized
+                scalar_values = norms
+                if nonnegative:
+                    scalar_values = torch.clamp(scalar_values, min=0.0)
+                scalar_target_updated[..., scalar_index : scalar_index + 1] = scalar_values
+
+            data[scalar_target_field] = scalar_target_updated
+            data[equiv_target_field] = equiv_target_updated
 
     @staticmethod
     def _encode_num_atoms(num_atoms: torch.Tensor, num_bits: int) -> torch.Tensor:
@@ -317,4 +457,5 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
         data[AtomicDataDict.T_SAMPLED_KEY] = tau
         data[self.alpha_field] = data_scale
         data[self.sigma_field] = noise_scale
+        self._apply_directional_velocity_target_couplings(data)
         return data
