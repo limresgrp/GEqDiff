@@ -371,7 +371,7 @@ train_lego_model() {
 }
 
 sample_lego_blocks() {
-  local latest_model model_path input_path output_path source_path metrics_json num_samples steps sampler_name late_refine_from_step late_refine_factor linger_step linger_count clash_guidance clash_guidance_strength clash_guidance_max_norm clash_guidance_weight_schedule clash_guidance_auto_scale clash_guidance_auto_scale_min clash_guidance_auto_scale_max cohesion_guidance_strength cohesion_guidance_target_contacts save_metrics device seed indices_raw save_intermediates
+  local latest_model model_path input_path output_path source_path metrics_json num_samples steps sampler_name late_refine_from_step late_refine_factor linger_step linger_count clash_guidance clash_guidance_strength clash_guidance_max_norm clash_guidance_weight_schedule clash_guidance_auto_scale clash_guidance_auto_scale_min clash_guidance_auto_scale_max cohesion_guidance_strength cohesion_guidance_target_contacts save_metrics device seed indices_raw save_intermediates use_refinement use_linger use_guidance use_cohesion
   latest_model="$(latest_named_file "${RESULTS_ROOT_PATH}" "best_model.pth")"
   model_path="$(prompt_with_default "Checkpoint path" "${latest_model}")"
   input_path="$(prompt_with_default "Input diffusion dataset path" "${DIFFUSION_DATASET_PATH}")"
@@ -381,27 +381,68 @@ sample_lego_blocks() {
   num_samples="$(prompt_with_default "Number of samples to draw" "4")"
   steps="$(prompt_with_default "Reverse integration steps" "20")"
   sampler_name="$(prompt_with_default "Flow-matching sampler (heun/euler)" "heun")"
-  late_refine_from_step="$(prompt_with_default "Late refine from discrete step (-1 disables)" "-1")"
-  late_refine_factor="$(prompt_with_default "Late refine factor" "1")"
-  linger_step="$(prompt_with_default "Experimental linger step (-1 disables)" "-1")"
-  linger_count="$(prompt_with_default "Experimental linger count" "0")"
-  if prompt_yes_no "Enable clash guidance?" "y"; then
+
+  if prompt_yes_no "Enable late refinement (substeps near low tau)?" "n"; then
+    use_refinement="y"
+    late_refine_from_step="$(prompt_with_default "Late refine from discrete step" "3")"
+    late_refine_factor="$(prompt_with_default "Late refine factor" "2")"
+  else
+    use_refinement="n"
+    late_refine_from_step="-1"
+    late_refine_factor="1"
+  fi
+
+  if prompt_yes_no "Enable experimental linger micro-steps?" "n"; then
+    use_linger="y"
+    linger_step="$(prompt_with_default "Experimental linger step" "1")"
+    linger_count="$(prompt_with_default "Experimental linger count" "3")"
+  else
+    use_linger="n"
+    linger_step="-1"
+    linger_count="0"
+  fi
+
+  if prompt_yes_no "Enable clash guidance?" "n"; then
+    use_guidance="y"
     clash_guidance="y"
+    clash_guidance_strength="$(prompt_with_default "Clash guidance strength" "0.05")"
+    clash_guidance_max_norm="$(prompt_with_default "Clash guidance max norm" "1.0")"
+    clash_guidance_weight_schedule="$(prompt_with_default "Clash guidance weight schedule" "late_quadratic")"
+    if prompt_yes_no "Auto-scale clash guidance to model velocity?" "n"; then
+      clash_guidance_auto_scale="y"
+      clash_guidance_auto_scale_min="$(prompt_with_default "Clash guidance auto-scale min" "0.2")"
+      clash_guidance_auto_scale_max="$(prompt_with_default "Clash guidance auto-scale max" "5.0")"
+    else
+      clash_guidance_auto_scale="n"
+      clash_guidance_auto_scale_min="0.2"
+      clash_guidance_auto_scale_max="5.0"
+    fi
   else
+    use_guidance="n"
     clash_guidance="n"
-  fi
-  clash_guidance_strength="$(prompt_with_default "Clash guidance strength" "0.05")"
-  clash_guidance_max_norm="$(prompt_with_default "Clash guidance max norm" "1.0")"
-  clash_guidance_weight_schedule="$(prompt_with_default "Clash guidance weight schedule" "late_quadratic")"
-  cohesion_guidance_strength="$(prompt_with_default "Cohesion guidance strength" "0.0")"
-  cohesion_guidance_target_contacts="$(prompt_with_default "Cohesion target contacts" "1.5")"
-  if prompt_yes_no "Auto-scale clash guidance to model velocity?" "y"; then
-    clash_guidance_auto_scale="y"
-  else
+    clash_guidance_strength="0.05"
+    clash_guidance_max_norm="1.0"
+    clash_guidance_weight_schedule="late_quadratic"
     clash_guidance_auto_scale="n"
+    clash_guidance_auto_scale_min="0.2"
+    clash_guidance_auto_scale_max="5.0"
   fi
-  clash_guidance_auto_scale_min="$(prompt_with_default "Clash guidance auto-scale min" "0.2")"
-  clash_guidance_auto_scale_max="$(prompt_with_default "Clash guidance auto-scale max" "5.0")"
+
+  if prompt_yes_no "Enable cohesion guidance term?" "n"; then
+    use_cohesion="y"
+    cohesion_guidance_strength="$(prompt_with_default "Cohesion guidance strength" "0.02")"
+    cohesion_guidance_target_contacts="$(prompt_with_default "Cohesion target contacts" "1.5")"
+  else
+    use_cohesion="n"
+    cohesion_guidance_strength="0.0"
+    cohesion_guidance_target_contacts="1.5"
+  fi
+  if [[ "${use_guidance}" != "y" ]]; then
+    use_cohesion="n"
+    cohesion_guidance_strength="0.0"
+    cohesion_guidance_target_contacts="1.5"
+  fi
+
   device="$(prompt_with_default "Device" "cuda:0")"
   seed="$(prompt_with_default "Random seed" "0")"
   indices_raw="$(prompt_with_default "Explicit diffusion example indices (space-separated, blank for random)" "")"
@@ -430,29 +471,27 @@ sample_lego_blocks() {
     --num-samples "${num_samples}"
     --steps "${steps}"
     --sampler "${sampler_name}"
-    --late-refine-from-step "${late_refine_from_step}"
-    --late-refine-factor "${late_refine_factor}"
-    --linger-step "${linger_step}"
-    --linger-count "${linger_count}"
-    --clash-guidance-strength "${clash_guidance_strength}"
-    --clash-guidance-max-norm "${clash_guidance_max_norm}"
-    --clash-guidance-weight-schedule "${clash_guidance_weight_schedule}"
-    --clash-guidance-auto-scale-min "${clash_guidance_auto_scale_min}"
-    --clash-guidance-auto-scale-max "${clash_guidance_auto_scale_max}"
-    --cohesion-guidance-strength "${cohesion_guidance_strength}"
-    --cohesion-guidance-target-contacts "${cohesion_guidance_target_contacts}"
     --device "${device}"
     --seed "${seed}"
   )
+  if [[ "${use_refinement}" == "y" ]]; then
+    cmd+=(--late-refine-from-step "${late_refine_from_step}" --late-refine-factor "${late_refine_factor}")
+  fi
+  if [[ "${use_linger}" == "y" ]]; then
+    cmd+=(--linger-step "${linger_step}" --linger-count "${linger_count}")
+  fi
   if [[ "${clash_guidance}" == "y" ]]; then
-    cmd+=(--clash-guidance)
+    cmd+=(--clash-guidance --clash-guidance-strength "${clash_guidance_strength}" --clash-guidance-max-norm "${clash_guidance_max_norm}" --clash-guidance-weight-schedule "${clash_guidance_weight_schedule}")
   else
     cmd+=(--no-clash-guidance)
   fi
   if [[ "${clash_guidance_auto_scale}" == "y" ]]; then
-    cmd+=(--clash-guidance-auto-scale)
+    cmd+=(--clash-guidance-auto-scale --clash-guidance-auto-scale-min "${clash_guidance_auto_scale_min}" --clash-guidance-auto-scale-max "${clash_guidance_auto_scale_max}")
   else
     cmd+=(--no-clash-guidance-auto-scale)
+  fi
+  if [[ "${use_cohesion}" == "y" ]]; then
+    cmd+=(--cohesion-guidance-strength "${cohesion_guidance_strength}" --cohesion-guidance-target-contacts "${cohesion_guidance_target_contacts}")
   fi
   if [[ -n "${source_path}" ]]; then
     cmd+=(--source-canonical "${source_path}")
