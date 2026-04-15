@@ -615,6 +615,32 @@ class MaskedWeightedMSELoss(MaskedLossWrapper):
         self.eps = float(eps)
         self.label = label
 
+    def _infer_valid_field_name(self) -> Optional[str]:
+        if self.weight_field.endswith("_weight"):
+            base = self.weight_field[: -len("_weight")]
+            if base:
+                return f"{base}_valid"
+        return None
+
+    def _resolve_valid_tensor(
+        self,
+        pred: dict,
+        ref: dict,
+        reference: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        valid_field = self._infer_valid_field_name()
+        if not valid_field:
+            return None
+
+        valid = pred.get(valid_field, ref.get(valid_field, None))
+        if valid is None:
+            return None
+        if not torch.is_tensor(valid):
+            raise TypeError(f"Validity field '{valid_field}' must be a tensor, got {type(valid)}.")
+        if valid.dim() > 1 and valid.shape[-1] == 1:
+            valid = valid.squeeze(-1)
+        return valid.to(device=reference.device) > 0.5
+
     def _resolve_weight_tensor(
         self,
         pred: dict,
@@ -658,6 +684,14 @@ class MaskedWeightedMSELoss(MaskedLossWrapper):
         self._initialize_supervision_weights(pred_key.device, pred_key.dtype)
         ref_key = self._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
         mask = self._resolve_mask(pred=pred, ref=ref, reference=pred_key)
+        valid_mask = self._resolve_valid_tensor(pred=pred, ref=ref, reference=pred_key)
+        if valid_mask is not None:
+            if valid_mask.shape[0] != mask.shape[0]:
+                raise ValueError(
+                    f"Validity-mask shape {tuple(valid_mask.shape)} is incompatible with node mask shape "
+                    f"{tuple(mask.shape)}."
+                )
+            mask = mask & valid_mask
         weights = self._resolve_weight_tensor(pred=pred, ref=ref, reference=pred_key)
 
         pred_key, ref_key, mask = self._apply_node_filter_and_mask(
