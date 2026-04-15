@@ -396,6 +396,7 @@ def _build_examples_for_frame(
 def _normalize_scalar_fields(
     examples: Sequence[Dict],
     normalize_scalars: bool,
+    normalize_dipole_strength: bool,
 ) -> Dict[str, Dict[str, np.ndarray]]:
     metadata: Dict[str, Dict[str, np.ndarray]] = {}
 
@@ -416,7 +417,11 @@ def _normalize_scalar_fields(
             example["shape_scalar_norm_stds"] = np.asarray(shape_stats["stds"], dtype=np.float32)
         return metadata
 
-    for field in ("shape_scalar_features", "dipole_strength"):
+    fields_to_normalize = ["shape_scalar_features"]
+    if normalize_dipole_strength:
+        fields_to_normalize.append("dipole_strength")
+
+    for field in fields_to_normalize:
         stacked = np.concatenate(
             [np.asarray(example[field], dtype=np.float32) for example in examples],
             axis=0,
@@ -624,7 +629,16 @@ def parse_args() -> argparse.Namespace:
         "--normalize-scalars",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Apply optional normalization to scalar shape magnitudes and dipole strengths.",
+        help="Apply optional normalization to scalar shape magnitudes (dipole strength has its own flag).",
+    )
+    parser.add_argument(
+        "--normalize-dipole-strength",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Normalize dipole_strength as a scalar feature. "
+            "Default false keeps apolar dipole_strength exactly 0.0."
+        ),
     )
     return parser.parse_args()
 
@@ -663,7 +677,11 @@ def main() -> None:
             )
         )
 
-    scalar_normalization = _normalize_scalar_fields(examples=examples, normalize_scalars=args.normalize_scalars)
+    scalar_normalization = _normalize_scalar_fields(
+        examples=examples,
+        normalize_scalars=args.normalize_scalars,
+        normalize_dipole_strength=args.normalize_dipole_strength,
+    )
     _print_stats(examples)
     print(f"Scalar normalization: {'enabled' if scalar_normalization else 'disabled'}")
 

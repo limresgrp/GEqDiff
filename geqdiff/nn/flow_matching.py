@@ -320,9 +320,24 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
     def _time_embedding(self, tau: torch.Tensor) -> torch.Tensor:
         return self.t_embedder(tau.to(dtype=torch.float32))
 
+    def _resolve_batch(self, data: AtomicDataDict.Type) -> torch.Tensor:
+        if AtomicDataDict.BATCH_KEY in data:
+            batch = data[AtomicDataDict.BATCH_KEY]
+            if batch.dim() > 1 and batch.shape[-1] == 1:
+                batch = batch.squeeze(-1)
+            return batch.to(dtype=torch.long)
+
+        if AtomicDataDict.POSITIONS_KEY not in data:
+            raise KeyError(
+                f"ForwardFlowMatchingModule expected '{AtomicDataDict.BATCH_KEY}' or "
+                f"'{AtomicDataDict.POSITIONS_KEY}' to infer a single-graph batch."
+            )
+        pos = data[AtomicDataDict.POSITIONS_KEY]
+        return torch.zeros((int(pos.shape[0]),), device=pos.device, dtype=torch.long)
+
     def _reverse(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         tau = data[AtomicDataDict.T_SAMPLED_KEY].to(dtype=torch.float32)
-        batch = data[AtomicDataDict.BATCH_KEY]
+        batch = self._resolve_batch(data)
         num_batches = int(batch.max().item()) + 1
         atom_counts = torch.bincount(batch, minlength=num_batches)
         data[self.num_atoms_field] = self._encode_num_atoms(atom_counts, self.num_atoms_bits)
@@ -373,6 +388,24 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
             with torch.no_grad():
                 return sample_ot_aligned_noise(x=x, data=data, batch=batch, corrupt_mask=corrupt_mask)
 
+        if field_name == AtomicDataDict.SHAPE_EQUIV_FEATURES_KEY:
+            if x.shape[-1] == 15:
+                parts = []
+                for width in (3, 5, 7):
+                    block = torch.randn((x.shape[0], width), device=x.device, dtype=x.dtype)
+                    norms = torch.linalg.norm(block, dim=-1, keepdim=True)
+                    block = block / torch.clamp(norms, min=1e-8)
+                    parts.append(block)
+                return torch.cat(parts, dim=-1)
+            return torch.randn(size=x.shape, device=x.device, dtype=x.dtype)
+
+        if field_name == AtomicDataDict.DIPOLE_DIRECTION_KEY:
+            if x.shape[-1] == 3:
+                noise = torch.randn(size=x.shape, device=x.device, dtype=x.dtype)
+                norms = torch.linalg.norm(noise, dim=-1, keepdim=True)
+                return noise / torch.clamp(norms, min=1e-8)
+            return torch.randn(size=x.shape, device=x.device, dtype=x.dtype)
+
         noise = torch.randn(size=x.shape, device=x.device, dtype=x.dtype)
         return noise
 
@@ -384,10 +417,12 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
     ) -> Optional[torch.Tensor]:
         if center_mask_field == "":
             return None
+        if center_mask_field not in data:
+            return None
         return self._resolve_mask(data=data, mask_field=center_mask_field, target=target)
 
     def _forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        batch = data[AtomicDataDict.BATCH_KEY]
+        batch = self._resolve_batch(data)
         num_batches = int(batch.max().item()) + 1
         device = batch.device
         atom_counts = torch.bincount(batch, minlength=num_batches)

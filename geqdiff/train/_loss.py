@@ -992,7 +992,9 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         extent_i = self._directional_extent(shape_coeffs[idx_i], directions)
         extent_j = self._directional_extent(shape_coeffs[idx_j], -directions)
         overlap = extent_i + extent_j + self.overlap_margin - distances
-        penalties = F.softplus(self.clash_sharpness * overlap) / self.clash_sharpness
+        # Harmonic hinge penalty: only overlapping pairs contribute.
+        overlap_violation = torch.relu(overlap)
+        penalties = 0.5 * self.clash_sharpness * overlap_violation.square()
         finite = torch.isfinite(penalties)
         if not torch.any(finite):
             return pos.new_empty((0,))

@@ -955,7 +955,12 @@ def _shape_aware_clash_energy(
     extent_i = _directional_extent(pred_shape_coeffs_detached[idx_i], directions)
     extent_j = _directional_extent(pred_shape_coeffs_detached[idx_j], -directions)
     overlap = extent_i + extent_j + float(overlap_margin) - distances
-    penalties = torch.nn.functional.softplus(float(clash_sharpness) * overlap) / float(clash_sharpness)
+    # Harmonic hinge penalty: zero gradient when no clash, quadratic growth on overlap.
+    stiffness = float(clash_sharpness)
+    if stiffness <= 0.0:
+        return pred_pos_0.new_zeros(())
+    overlap_violation = torch.nn.functional.relu(overlap)
+    penalties = 0.5 * stiffness * overlap_violation.square()
     if penalties.numel() == 0:
         return pred_pos_0.new_zeros(())
     finite = torch.isfinite(penalties)
