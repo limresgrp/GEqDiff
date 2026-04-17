@@ -24,6 +24,7 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
     center_noise_fields: List[bool]
     noise_center_mask_fields: List[str]
     mask_fields: List[str]
+    unit_norm_noise_fields: List[bool]
     unmasked_noise_scales: List[float]
     directional_scalar_out_fields: List[str]
     directional_equiv_out_fields: List[str]
@@ -87,6 +88,7 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
         self.center_noise_fields = []
         self.noise_center_mask_fields = []
         self.mask_fields = []
+        self.unit_norm_noise_fields = []
         self.unmasked_noise_scales = []
 
         for idx, spec in enumerate(corrupt_fields):
@@ -105,6 +107,10 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
             center_noise = bool(spec.get("center_noise", center_field))
             mask_field = spec.get("mask_field", parsed_default_mask)
             mask_field = "" if mask_field in (None, "") else str(mask_field)
+            unit_norm_noise = spec.get("unit_norm_noise", "__auto__")
+            if unit_norm_noise == "__auto__":
+                unit_norm_noise = False
+            unit_norm_noise = bool(unit_norm_noise)
             noise_center_mask_field = spec.get("noise_center_mask_field", "__auto__")
             if noise_center_mask_field == "__auto__":
                 if field_name == AtomicDataDict.POSITIONS_KEY and mask_field != "":
@@ -129,6 +135,7 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
             self.center_noise_fields.append(center_noise)
             self.noise_center_mask_fields.append(noise_center_mask_field)
             self.mask_fields.append(mask_field)
+            self.unit_norm_noise_fields.append(unit_norm_noise)
             self.unmasked_noise_scales.append(unmasked_noise_scale)
 
         self.out_field = self.out_fields[0]
@@ -383,13 +390,14 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
         data: AtomicDataDict.Type,
         batch: torch.Tensor,
         corrupt_mask: Optional[torch.Tensor] = None,
+        unit_norm_noise: bool = True,
     ) -> torch.Tensor:
         if field_name == AtomicDataDict.POSITIONS_KEY and self.use_aot and (not torch.jit.is_scripting()):
             with torch.no_grad():
                 return sample_ot_aligned_noise(x=x, data=data, batch=batch, corrupt_mask=corrupt_mask)
 
         if field_name == AtomicDataDict.SHAPE_EQUIV_FEATURES_KEY:
-            if x.shape[-1] == 15:
+            if unit_norm_noise and x.shape[-1] == 15:
                 parts = []
                 for width in (3, 5, 7):
                     block = torch.randn((x.shape[0], width), device=x.device, dtype=x.dtype)
@@ -400,7 +408,7 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
             return torch.randn(size=x.shape, device=x.device, dtype=x.dtype)
 
         if field_name == AtomicDataDict.DIPOLE_DIRECTION_KEY:
-            if x.shape[-1] == 3:
+            if unit_norm_noise and x.shape[-1] == 3:
                 noise = torch.randn(size=x.shape, device=x.device, dtype=x.dtype)
                 norms = torch.linalg.norm(noise, dim=-1, keepdim=True)
                 return noise / torch.clamp(norms, min=1e-8)
@@ -457,7 +465,14 @@ class ForwardFlowMatchingModule(GraphModuleMixin, torch.nn.Module):
                 center_mask_field=self.noise_center_mask_fields[idx],
                 target=x,
             )
-            noise = self._sample_noise(field_name=field_name, x=x, data=data, batch=batch, corrupt_mask=mask)
+            noise = self._sample_noise(
+                field_name=field_name,
+                x=x,
+                data=data,
+                batch=batch,
+                corrupt_mask=mask,
+                unit_norm_noise=self.unit_norm_noise_fields[idx],
+            )
             if self.centered_fields[idx] and self.center_noise_fields[idx]:
                 noise = center_pos(noise, batch=batch, mask=noise_center_mask)
 

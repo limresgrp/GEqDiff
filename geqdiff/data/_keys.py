@@ -15,6 +15,8 @@ NUM_ATOMS_BITS_KEY: Final[str] = "num_atoms_bits"
 
 # (n_nodes, 4)
 SHAPE_SCALAR_FEATURES_KEY: Final[str] = "shape_scalar_features"
+# (n_nodes, 16)
+SHAPE_FEATURES_KEY: Final[str] = "shape_features"
 # (n_nodes, 15)
 SHAPE_EQUIV_FEATURES_KEY: Final[str] = "shape_equiv_features"
 # (n_nodes, 1)

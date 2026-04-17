@@ -22,8 +22,10 @@ from geqdiff.utils import FlowMatchingHeunSampler, FlowMatchingSampler, FlowMatc
 from geqdiff.utils.diffusion import center_pos, compute_reference_mean
 from geqdiff.utils.dipole_utils import (
     combine_shape_irreps,
+    dipole_strengths,
     normalize_dipole_directions,
     normalize_rows,
+    split_shape_irreps,
 )
 from geqdiff.utils.feature_utils import invert_scalar_normalization
 from geqdiff.scripts.evaluate_lego_samples import build_evaluation_report
@@ -33,6 +35,7 @@ from lego.utils import decode_brick_signatures, load_samples, save_samples
 
 STATE_FIELD_SPECS = (
     ("pos", "velocity"),
+    ("shape_features", "shape_features_velocity"),
     ("shape_scalar_features", "shape_scalar_velocity"),
     ("shape_equiv_features", "shape_equiv_velocity"),
     ("dipole_strength", "dipole_strength_velocity"),
@@ -47,11 +50,16 @@ def _default_noise_like(
     num_nodes: int,
     generator: torch.Generator,
     device: torch.device,
+    unit_norm_noise: bool = True,
 ) -> torch.Tensor:
     if field_name == "shape_equiv_features":
-        return _random_shape_equiv_noise(num_nodes, generator=generator, device=device)
+        if unit_norm_noise:
+            return _random_shape_equiv_noise(num_nodes, generator=generator, device=device)
+        return torch.randn(data.shape, generator=generator, device=device, dtype=torch.float32)
     if field_name == "dipole_direction":
-        return _random_unit_vectors((num_nodes, int(data.shape[-1])), generator=generator, device=device)
+        if unit_norm_noise:
+            return _random_unit_vectors((num_nodes, int(data.shape[-1])), generator=generator, device=device)
+        return torch.randn(data.shape, generator=generator, device=device, dtype=torch.float32)
     return torch.randn(data.shape, generator=generator, device=device, dtype=torch.float32)
 
 
@@ -98,6 +106,14 @@ def parse_args() -> argparse.Namespace:
         default="heun",
         choices=("heun", "euler"),
         help="Reverse integrator to use for flow matching. `heun` is slower but usually more accurate.",
+    )
+    parser.add_argument(
+        "--project-normalized-states",
+        action="store_true",
+        help=(
+            "Project direction-like state tensors to unit norm after each reverse step. "
+            "Disabled by default to avoid train/inference mismatch."
+        ),
     )
     parser.add_argument(
         "--late-refine-from-step",
@@ -296,6 +312,14 @@ def infer_project_normalized_states(config: Dict) -> bool:
     return bool(config.get("project_normalized_states", True))
 
 
+def infer_direct_dipole_vector(config: Dict) -> bool:
+    return bool(config.get("direct_dipole_vector", False))
+
+
+def infer_direct_shape_vector(config: Dict) -> bool:
+    return bool(config.get("direct_shape_vector", False))
+
+
 def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
     model_cfg = config.get("model", {})
     stack = model_cfg.get("stack", [])
@@ -308,6 +332,7 @@ def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
             "center_noise": field == AtomicDataDict.POSITIONS_KEY,
             "noise_center_mask_field": "",
             "mask_field": "ligand_mask",
+            "unit_norm_noise": field in {"shape_equiv_features", "dipole_direction"},
         }
         for field, out_field in STATE_FIELD_SPECS
     }
@@ -332,6 +357,10 @@ def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
         else:
             center_mask_field = str(center_mask_field)
         center_noise = bool(spec.get("center_noise", center_field))
+        unit_norm_noise = spec.get("unit_norm_noise", "__auto__")
+        if unit_norm_noise == "__auto__":
+            unit_norm_noise = field_name in {"shape_equiv_features", "dipole_direction"}
+        unit_norm_noise = bool(unit_norm_noise)
         noise_center_mask_field = spec.get("noise_center_mask_field", "__auto__")
         if noise_center_mask_field == "__auto__":
             mask_field = spec.get("mask_field", "")
@@ -351,6 +380,7 @@ def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
             "center_noise": center_noise,
             "noise_center_mask_field": noise_center_mask_field,
             "mask_field": "" if spec.get("mask_field", "") in (None, "") else str(spec.get("mask_field", "")),
+            "unit_norm_noise": unit_norm_noise,
         }
     return parsed if parsed else default_specs
 
@@ -452,12 +482,22 @@ def _slice_dense_field(data: Dict[str, np.ndarray], field: str, example_index: i
 
 def extract_example(data: Dict[str, np.ndarray], example_index: int) -> Dict[str, np.ndarray]:
     num_nodes = int(np.asarray(data["num_nodes"])[example_index])
+    shape_scalar_features = _slice_dense_field(data, "shape_scalar_features", example_index, num_nodes).astype(np.float32)
+    shape_equiv_features = _slice_dense_field(data, "shape_equiv_features", example_index, num_nodes).astype(np.float32)
+    if "shape_features" in data:
+        shape_features = _slice_dense_field(data, "shape_features", example_index, num_nodes).astype(np.float32)
+    elif "shape_features_raw" in data:
+        shape_features = _slice_dense_field(data, "shape_features_raw", example_index, num_nodes).astype(np.float32)
+    else:
+        shape_features = combine_shape_irreps(shape_scalar_features, shape_equiv_features).astype(np.float32)
+
     example: Dict[str, np.ndarray] = {
         "num_nodes": np.asarray(num_nodes, dtype=np.int64),
         "pos": _slice_dense_field(data, "pos", example_index, num_nodes).astype(np.float32),
         "rotations": _slice_dense_field(data, "rotations", example_index, num_nodes).astype(np.float32),
-        "shape_scalar_features": _slice_dense_field(data, "shape_scalar_features", example_index, num_nodes).astype(np.float32),
-        "shape_equiv_features": _slice_dense_field(data, "shape_equiv_features", example_index, num_nodes).astype(np.float32),
+        "shape_features": shape_features,
+        "shape_scalar_features": shape_scalar_features,
+        "shape_equiv_features": shape_equiv_features,
         "dipole_strength": _slice_dense_field(data, "dipole_strength", example_index, num_nodes).astype(np.float32),
         "dipole_direction": _slice_dense_field(data, "dipole_direction", example_index, num_nodes).astype(np.float32),
         "ligand_mask": _slice_dense_field(data, "ligand_mask", example_index, num_nodes).astype(bool).reshape(num_nodes),
@@ -543,28 +583,43 @@ def _decode_sampled_structure(
     state: Dict[str, torch.Tensor],
     example: Dict[str, np.ndarray],
     scalar_normalization: Dict[str, Dict[str, np.ndarray]],
+    direct_shape_vector: bool = False,
+    direct_dipole_vector: bool = False,
 ) -> Dict[str, np.ndarray]:
     sampled_pos = (state["pos"] + state["centroid"]).detach().cpu().numpy().astype(np.float32)
-    sampled_shape_scalar_model = state["shape_scalar_features"].detach().cpu().numpy().astype(np.float32)
-    sampled_dipole_strength_model = state["dipole_strength"].detach().cpu().numpy().astype(np.float32)
-    sampled_shape_equiv = _project_shape_equiv(state["shape_equiv_features"]).detach().cpu().numpy().astype(np.float32)
-    sampled_dipole_direction = _project_dipole_direction(state["dipole_direction"]).detach().cpu().numpy().astype(np.float32)
+    sampled_dipole_direction_state = state["dipole_direction"].detach().cpu().numpy().astype(np.float32)
 
-    sampled_shape_scalar = (
-        invert_scalar_normalization(sampled_shape_scalar_model, scalar_normalization["shape_scalar_features"]).astype(np.float32)
-        if "shape_scalar_features" in scalar_normalization
-        else sampled_shape_scalar_model
-    )
-    sampled_dipole_strength = (
-        invert_scalar_normalization(sampled_dipole_strength_model, scalar_normalization["dipole_strength"]).astype(np.float32)
-        if "dipole_strength" in scalar_normalization
-        else sampled_dipole_strength_model
-    )
-    sampled_dipole_strength = np.clip(sampled_dipole_strength, 0.0, None).astype(np.float32)
-    sampled_dipole_direction = normalize_dipole_directions(sampled_dipole_direction).astype(np.float32)
+    if direct_shape_vector:
+        sampled_shape = state["shape_features"].detach().cpu().numpy().astype(np.float32)
+        sampled_shape_scalar, sampled_shape_equiv = split_shape_irreps(sampled_shape)
+    else:
+        sampled_shape_scalar_model = state["shape_scalar_features"].detach().cpu().numpy().astype(np.float32)
+        sampled_shape_equiv = _project_shape_equiv(state["shape_equiv_features"]).detach().cpu().numpy().astype(np.float32)
+        sampled_shape_scalar = (
+            invert_scalar_normalization(sampled_shape_scalar_model, scalar_normalization["shape_scalar_features"]).astype(np.float32)
+            if "shape_scalar_features" in scalar_normalization
+            else sampled_shape_scalar_model
+        )
+        sampled_shape = combine_shape_irreps(sampled_shape_scalar, sampled_shape_equiv).astype(np.float32)
 
-    sampled_shape = combine_shape_irreps(sampled_shape_scalar, sampled_shape_equiv).astype(np.float32)
-    sampled_dipoles = (sampled_dipole_direction * sampled_dipole_strength).astype(np.float32)
+    if direct_dipole_vector:
+        sampled_dipoles = sampled_dipole_direction_state.astype(np.float32)
+        sampled_dipole_strength = dipole_strengths(sampled_dipoles).astype(np.float32)
+        sampled_dipole_direction = normalize_dipole_directions(sampled_dipoles).astype(np.float32)
+    else:
+        sampled_dipole_strength_model = state["dipole_strength"].detach().cpu().numpy().astype(np.float32)
+        sampled_dipole_strength = (
+            invert_scalar_normalization(sampled_dipole_strength_model, scalar_normalization["dipole_strength"]).astype(np.float32)
+            if "dipole_strength" in scalar_normalization
+            else sampled_dipole_strength_model
+        )
+        # Legacy coupled checkpoints can represent dipole sign via negative strength with opposite direction.
+        # Compose the signed vector first, then derive nonnegative magnitude from its norm.
+        sampled_dipole_direction_raw = _project_dipole_direction(state["dipole_direction"]).detach().cpu().numpy().astype(np.float32)
+        sampled_dipoles = (sampled_dipole_direction_raw * sampled_dipole_strength).astype(np.float32)
+        sampled_dipole_strength = dipole_strengths(sampled_dipoles).astype(np.float32)
+        sampled_dipole_direction = normalize_dipole_directions(sampled_dipoles).astype(np.float32)
+
     decoded_library = decode_brick_signatures(sampled_shape)
     brick_types = np.asarray(example["types"]).astype(str).copy()
     brick_rotations = np.asarray(example["rotations"], dtype=np.float32).copy()
@@ -588,13 +643,21 @@ def _trajectory_snapshot(
     state: Dict[str, torch.Tensor],
     example: Dict[str, np.ndarray],
     scalar_normalization: Dict[str, Dict[str, np.ndarray]],
+    direct_shape_vector: bool,
+    direct_dipole_vector: bool,
     *,
     stage_index: int,
     stage_label: str,
     scheduler_step: int,
     tau: float,
 ) -> Dict[str, np.ndarray]:
-    snapshot = _decode_sampled_structure(state, example, scalar_normalization)
+    snapshot = _decode_sampled_structure(
+        state,
+        example,
+        scalar_normalization,
+        direct_shape_vector=direct_shape_vector,
+        direct_dipole_vector=direct_dipole_vector,
+    )
     snapshot["stage_index"] = np.asarray(stage_index, dtype=np.int64)
     snapshot["stage_label"] = np.asarray(stage_label)
     snapshot["scheduler_step"] = np.asarray(scheduler_step, dtype=np.int64)
@@ -717,7 +780,14 @@ def initial_masked_state(
             if field_name == "pos":
                 state["centroid"] = torch.zeros((1, int(data.shape[-1])), dtype=data.dtype, device=device)
 
-        noise = _default_noise_like(field_name, data, num_nodes=num_nodes, generator=generator, device=device)
+        noise = _default_noise_like(
+            field_name,
+            data,
+            num_nodes=num_nodes,
+            generator=generator,
+            device=device,
+            unit_norm_noise=bool(spec.get("unit_norm_noise", True)),
+        )
         noise_center_mask = None
         noise_center_mask_field = str(spec.get("noise_center_mask_field", ""))
         if noise_center_mask_field != "":
@@ -753,7 +823,7 @@ def _build_model_input(
     ligand_mask_column = state["ligand_mask"].unsqueeze(-1)
     tau = torch.full((1, 1), float(tau_value), device=device, dtype=torch.float32)
     edge_index = build_edge_index(state["pos"], cutoff=r_max)
-    return {
+    payload = {
         AtomicDataDict.POSITIONS_KEY: state["pos"],
         AtomicDataDict.NODE_TYPE_KEY: node_types,
         AtomicDataDict.BATCH_KEY: batch,
@@ -767,6 +837,9 @@ def _build_model_input(
         AtomicDataDict.POCKET_MASK_KEY: state["pocket_mask"].unsqueeze(-1).to(dtype=torch.float32),
         AtomicDataDict.ROTATIONS_KEY: rotations,
     }
+    if "shape_features" in state:
+        payload[AtomicDataDict.SHAPE_FEATURES_KEY] = state["shape_features"]
+    return payload
 
 
 def _apply_state_projection(
@@ -819,13 +892,18 @@ def _merge_ligand_updates(
 ) -> Dict[str, torch.Tensor]:
     ligand_mask_column = state["ligand_mask"].unsqueeze(-1)
     merged = dict(state)
+    shape_features_fixed = state.get("shape_features_fixed")
     shape_scalar_fixed = state.get("shape_scalar_features_fixed", state.get("shape_scalar_fixed"))
     shape_equiv_fixed = state.get("shape_equiv_features_fixed", state.get("shape_equiv_fixed"))
+    if "shape_features" in state and shape_features_fixed is None:
+        raise KeyError("Missing fixed state for shape_features.")
     if shape_scalar_fixed is None:
         raise KeyError("Missing fixed state for shape_scalar_features.")
     if shape_equiv_fixed is None:
         raise KeyError("Missing fixed state for shape_equiv_features.")
     merged["pos"] = torch.where(ligand_mask_column, next_states["pos"], state["pos_fixed"])
+    if "shape_features" in state:
+        merged["shape_features"] = torch.where(ligand_mask_column, next_states["shape_features"], shape_features_fixed)
     merged["shape_scalar_features"] = torch.where(ligand_mask_column, next_states["shape_scalar_features"], shape_scalar_fixed)
     merged["shape_equiv_features"] = torch.where(ligand_mask_column, next_states["shape_equiv_features"], shape_equiv_fixed)
     merged["dipole_strength"] = torch.where(ligand_mask_column, next_states["dipole_strength"], state["dipole_strength_fixed"])
@@ -1059,7 +1137,7 @@ def _apply_clash_guidance(
 ) -> Dict[str, torch.Tensor]:
     if (not guidance_enabled) or guidance_strength <= 0.0 or tau_value <= 1e-8:
         return output
-    if not all(field in output for field in ("velocity", "shape_scalar_velocity", "shape_equiv_velocity")):
+    if "velocity" not in output:
         return output
 
     tau_value = float(tau_value)
@@ -1081,15 +1159,23 @@ def _apply_clash_guidance(
             state["pos"].detach().to(dtype=torch.float32)
             - tau_value * output["velocity"].detach().to(dtype=torch.float32)
         ).clone().requires_grad_(True)
-        pred_shape_scalar = (
-            state["shape_scalar_features"].detach().to(dtype=torch.float32)
-            - tau_value * output["shape_scalar_velocity"].detach().to(dtype=torch.float32)
-        )
-        pred_shape_equiv = (
-            state["shape_equiv_features"].detach().to(dtype=torch.float32)
-            - tau_value * output["shape_equiv_velocity"].detach().to(dtype=torch.float32)
-        )
-        pred_shape_coeffs = _combine_shape_irreps_torch(pred_shape_scalar, pred_shape_equiv).detach()
+        if "shape_features_velocity" in output and "shape_features" in state:
+            pred_shape_coeffs = (
+                state["shape_features"].detach().to(dtype=torch.float32)
+                - tau_value * output["shape_features_velocity"].detach().to(dtype=torch.float32)
+            ).detach()
+        elif all(field in output for field in ("shape_scalar_velocity", "shape_equiv_velocity")):
+            pred_shape_scalar = (
+                state["shape_scalar_features"].detach().to(dtype=torch.float32)
+                - tau_value * output["shape_scalar_velocity"].detach().to(dtype=torch.float32)
+            )
+            pred_shape_equiv = (
+                state["shape_equiv_features"].detach().to(dtype=torch.float32)
+                - tau_value * output["shape_equiv_velocity"].detach().to(dtype=torch.float32)
+            )
+            pred_shape_coeffs = _combine_shape_irreps_torch(pred_shape_scalar, pred_shape_equiv).detach()
+        else:
+            return output
         clash_energy = _shape_aware_clash_energy(
             pred_pos_0,
             pred_shape_coeffs,
@@ -1157,6 +1243,7 @@ def _euler_candidate_states(
     dtau = sampler.dtau_from_values(x_t=state["pos"], tau_t=tau_t, tau_prev=tau_prev)
     next_states = {
         "pos": state["pos"],
+        "shape_features": state["shape_features"],
         "shape_scalar_features": state["shape_scalar_features"],
         "shape_equiv_features": state["shape_equiv_features"],
         "dipole_strength": state["dipole_strength"],
@@ -1183,6 +1270,8 @@ def sample_example(
     device: torch.device,
     seed: int,
     scalar_normalization: Dict[str, Dict[str, np.ndarray]],
+    direct_shape_vector: bool,
+    direct_dipole_vector: bool,
     project_normalized_states: bool,
     corrupt_field_map: Dict[str, str],
     corrupt_field_settings: Dict[str, Dict[str, Any]],
@@ -1234,6 +1323,8 @@ def sample_example(
                 state,
                 example,
                 scalar_normalization,
+                direct_shape_vector=direct_shape_vector,
+                direct_dipole_vector=direct_dipole_vector,
                 stage_index=0,
                 stage_label="noise",
                 scheduler_step=int(initial_stage["scheduler_step"]),
@@ -1317,6 +1408,7 @@ def sample_example(
             )
             next_states = {
                 "pos": state["pos"],
+                "shape_features": state["shape_features"],
                 "shape_scalar_features": state["shape_scalar_features"],
                 "shape_equiv_features": state["shape_equiv_features"],
                 "dipole_strength": state["dipole_strength"],
@@ -1360,6 +1452,8 @@ def sample_example(
                     state,
                     example,
                     scalar_normalization,
+                    direct_shape_vector=direct_shape_vector,
+                    direct_dipole_vector=direct_dipole_vector,
                     stage_index=step_idx + 1,
                     stage_label=stage_label,
                     scheduler_step=scheduler_step,
@@ -1367,7 +1461,13 @@ def sample_example(
                 )
             )
 
-    decoded_sample = _decode_sampled_structure(state, example, scalar_normalization)
+    decoded_sample = _decode_sampled_structure(
+        state,
+        example,
+        scalar_normalization,
+        direct_shape_vector=direct_shape_vector,
+        direct_dipole_vector=direct_dipole_vector,
+    )
 
     original_shape = np.asarray(
         example.get("shape_features_raw", combine_shape_irreps(example["shape_scalar_features"], example["shape_equiv_features"])),
@@ -1377,13 +1477,17 @@ def sample_example(
         example.get("brick_dipoles_raw", example["dipole_direction"] * example["dipole_strength"]),
         dtype=np.float32,
     )
-    original_dipole_strength = np.asarray(
-        example.get("dipole_strength_raw", example["dipole_strength"]),
-        dtype=np.float32,
-    )
-    original_dipole_direction = normalize_dipole_directions(
-        np.asarray(example.get("dipole_direction_raw", example["dipole_direction"]), dtype=np.float32)
-    ).astype(np.float32)
+    if direct_dipole_vector:
+        original_dipole_strength = dipole_strengths(original_dipoles).astype(np.float32)
+        original_dipole_direction = normalize_dipole_directions(original_dipoles).astype(np.float32)
+    else:
+        original_dipole_strength = np.asarray(
+            example.get("dipole_strength_raw", example["dipole_strength"]),
+            dtype=np.float32,
+        )
+        original_dipole_direction = normalize_dipole_directions(
+            np.asarray(example.get("dipole_direction_raw", example["dipole_direction"]), dtype=np.float32)
+        ).astype(np.float32)
 
     sample = {
         **decoded_sample,
@@ -1454,7 +1558,9 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     model, config, _ = CheckpointHandler.load_model(str(args.model), device=args.device)
     validate_flow_checkpoint_config(config)
-    project_normalized_states = infer_project_normalized_states(config)
+    direct_shape_vector = infer_direct_shape_vector(config)
+    direct_dipole_vector = infer_direct_dipole_vector(config)
+    project_normalized_states = bool(args.project_normalized_states)
     corrupt_field_settings = infer_corrupt_field_settings(config)
     corrupt_field_map = infer_corrupt_field_map(config)
     directional_velocity_couplings = infer_directional_velocity_couplings(config)
@@ -1494,6 +1600,8 @@ def main(args: argparse.Namespace | None = None) -> None:
             device=torch.device(args.device),
             seed=args.seed + output_index,
             scalar_normalization=scalar_normalization,
+            direct_shape_vector=direct_shape_vector,
+            direct_dipole_vector=direct_dipole_vector,
             project_normalized_states=project_normalized_states,
             corrupt_field_map=corrupt_field_map,
             corrupt_field_settings=corrupt_field_settings,
