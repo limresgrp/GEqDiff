@@ -205,6 +205,7 @@ def _validate_example(example: Dict, adjacency: Sequence[Sequence[int]], split_s
     shape_equiv_features = np.asarray(example["shape_equiv_features"], dtype=np.float32)
     dipole_strength = np.asarray(example["dipole_strength"], dtype=np.float32)
     dipole_direction = np.asarray(example["dipole_direction"], dtype=np.float32)
+    sequence_position = np.asarray(example["sequence_position"], dtype=np.float32)
     shape_l1_valid = np.asarray(example["shape_l1_valid"], dtype=bool)
     shape_l2_valid = np.asarray(example["shape_l2_valid"], dtype=bool)
     shape_l3_valid = np.asarray(example["shape_l3_valid"], dtype=bool)
@@ -223,6 +224,7 @@ def _validate_example(example: Dict, adjacency: Sequence[Sequence[int]], split_s
     assert shape_equiv_features.shape == (num_nodes, 15)
     assert dipole_strength.shape == (num_nodes, 1)
     assert dipole_direction.shape == (num_nodes, 3)
+    assert sequence_position.shape == (num_nodes, 1)
     assert shape_l1_valid.shape == (num_nodes,)
     assert shape_l2_valid.shape == (num_nodes,)
     assert shape_l3_valid.shape == (num_nodes,)
@@ -254,6 +256,22 @@ def _build_frame_record(sample: Dict, source_frame_id: int, type_vocab: Sequence
     rotations = np.asarray(sample["brick_rotations"], dtype=np.float32)
     types = np.asarray(sample["brick_types"])
     node_types_true = encode_type_names(types, type_vocab)
+    if "brick_sequence_position" in sample:
+        sequence_position = np.asarray(sample["brick_sequence_position"], dtype=np.float32)
+    elif "sequence_position" in sample:
+        sequence_position = np.asarray(sample["sequence_position"], dtype=np.float32)
+    else:
+        sequence_position = np.arange(pos.shape[0], dtype=np.float32)[:, None]
+    if sequence_position.ndim == 1:
+        sequence_position = sequence_position[:, None]
+    if sequence_position.shape != (pos.shape[0], 1):
+        raise ValueError(
+            f"Expected sequence_position shape {(pos.shape[0], 1)}, got {sequence_position.shape}."
+        )
+    if "sequence_pos_max" in sample:
+        sequence_pos_max = int(np.asarray(sample["sequence_pos_max"]).reshape(-1)[0])
+    else:
+        sequence_pos_max = int(max(pos.shape[0], 1))
     shape_features = np.asarray(sample["brick_features"], dtype=np.float32)
     shape_scalar_features, shape_equiv_features = split_shape_irreps(shape_features)
 
@@ -288,6 +306,8 @@ def _build_frame_record(sample: Dict, source_frame_id: int, type_vocab: Sequence
         "rotations": rotations,
         "types": types,
         "node_types_true": node_types_true,
+        "sequence_position": sequence_position.astype(np.float32),
+        "sequence_pos_max": np.int64(sequence_pos_max),
         "type_vocab": np.asarray(type_vocab),
         "shape_features_raw": shape_features,
         "shape_scalar_features": shape_scalar_features,
@@ -357,12 +377,14 @@ def _build_examples_for_frame(
             "split_id": np.int64(split_id),
             "num_nodes": np.int64(num_nodes),
             "ligand_size": np.int64(ligand_mask.sum()),
+            "sequence_pos_max": np.int64(frame["sequence_pos_max"]),
             "num_edges": np.int64(frame["edge_index"].shape[1]),
             "pos": frame["pos"].astype(np.float32),
             "rotations": frame["rotations"].astype(np.float32),
             "types": np.asarray(frame["types"]),
             "node_types": input_node_types.astype(np.int64),
             "node_types_true": frame["node_types_true"].astype(np.int64),
+            "sequence_position": frame["sequence_position"].astype(np.float32),
             "shape_features_raw": frame["shape_features_raw"].astype(np.float32),
             "shape_scalar_features": frame["shape_scalar_features"].astype(np.float32),
             "shape_equiv_features": frame["shape_equiv_features"].astype(np.float32),
@@ -474,6 +496,7 @@ def _pack_examples(
     _pad_node_field(payload, "types", examples, max_nodes, f"<U{max_type_len}")
     _pad_node_field(payload, "node_types", examples, max_nodes, np.int64)
     _pad_node_field(payload, "node_types_true", examples, max_nodes, np.int64)
+    _pad_node_field(payload, "sequence_position", examples, max_nodes, np.float32, tail_shape=(1,))
     _pad_node_field(payload, "shape_features_raw", examples, max_nodes, np.float32, tail_shape=(16,))
     _pad_node_field(payload, "shape_scalar_features", examples, max_nodes, np.float32, tail_shape=(4,))
     _pad_node_field(payload, "shape_scalar_features_raw", examples, max_nodes, np.float32, tail_shape=(4,))
@@ -515,7 +538,7 @@ def _pack_examples(
             payload["contact_pairs"][example_index, :num_pairs] = example["contact_pairs"]
             payload["contact_face_dirs"][example_index, :num_pairs] = example["contact_face_dirs"]
 
-    for field in ["source_frame_id", "split_id", "num_nodes", "ligand_size", "num_edges"]:
+    for field in ["source_frame_id", "split_id", "num_nodes", "ligand_size", "sequence_pos_max", "num_edges"]:
         payload[field] = np.asarray([example[field] for example in examples], dtype=np.int64)
     for field in ["frame_centroid", "ligand_centroid"]:
         payload[field] = np.asarray([example[field] for example in examples], dtype=np.float32)

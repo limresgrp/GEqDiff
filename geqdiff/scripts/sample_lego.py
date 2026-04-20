@@ -101,6 +101,16 @@ def parse_args() -> argparse.Namespace:
         help="Number of reverse integration steps. Lower values are faster but coarser.",
     )
     parser.add_argument(
+        "--start-step",
+        type=int,
+        default=-1,
+        help=(
+            "Optional initial scheduler step to start from (0..T-1). "
+            "If set, masked fields are initialized as x_tau=(1-tau)x_data+tau*noise at that step. "
+            "Default -1 disables this and starts from full-noise (T-1)."
+        ),
+    )
+    parser.add_argument(
         "--sampler",
         type=str,
         default="heun",
@@ -669,6 +679,7 @@ def _build_sampling_schedule(
     sampler: FlowMatchingSampler,
     *,
     steps: int,
+    start_scheduler_step: int,
     late_refine_from_step: int,
     late_refine_factor: int,
     linger_step: int,
@@ -681,7 +692,9 @@ def _build_sampling_schedule(
     if linger_count < 0:
         raise ValueError("--linger-count must be >= 0.")
 
-    start_step = sampler.T - 1
+    start_step = int(start_scheduler_step)
+    if start_step < 0 or start_step >= int(sampler.T):
+        raise ValueError(f"start_scheduler_step must be in [0, {int(sampler.T) - 1}], got {start_step}.")
     time_edges = np.linspace(0, start_step, num=steps + 1, dtype=int)[::-1].copy()
     schedule: List[Dict[str, float | int | str]] = []
 
@@ -738,6 +751,7 @@ def initial_masked_state(
     device: torch.device,
     corrupt_field_map: Dict[str, str],
     corrupt_field_settings: Dict[str, Dict[str, Any]],
+    start_tau: float = 1.0,
 ):
     ligand_mask = torch.as_tensor(example["ligand_mask"], dtype=torch.bool, device=device)
     pocket_mask = torch.as_tensor(example["pocket_mask"], dtype=torch.bool, device=device)
@@ -746,6 +760,10 @@ def initial_masked_state(
         "pocket_mask": pocket_mask,
         "centroid": torch.zeros((1, 3), dtype=torch.float32, device=device),
     }
+
+    tau = float(np.clip(start_tau, 0.0, 1.0))
+    data_scale = 1.0 - tau
+    noise_scale = tau
 
     num_nodes = int(example["num_nodes"])
     for field_name, _ in STATE_FIELD_SPECS:
@@ -801,7 +819,8 @@ def initial_masked_state(
 
         current = centered.clone()
         if field_name in corrupt_field_map:
-            current[ligand_mask] = noise[ligand_mask]
+            mixed = data_scale * centered + noise_scale * noise
+            current[ligand_mask] = mixed[ligand_mask]
 
         fixed_key = "pos_fixed" if field_name == "pos" else f"{field_name}_fixed"
         state[fixed_key] = centered
@@ -1269,6 +1288,7 @@ def sample_example(
     steps: int,
     device: torch.device,
     seed: int,
+    start_scheduler_step: int,
     scalar_normalization: Dict[str, Dict[str, np.ndarray]],
     direct_shape_vector: bool,
     direct_dipole_vector: bool,
@@ -1295,12 +1315,19 @@ def sample_example(
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
 
+    if start_scheduler_step < 0 or start_scheduler_step >= int(sampler.T):
+        raise ValueError(
+            f"start_scheduler_step must be in [0, {int(sampler.T) - 1}], got {start_scheduler_step}."
+        )
+    start_tau = float(sampler.scheduler.tau[int(start_scheduler_step)].item())
+
     state = initial_masked_state(
         example=example,
         generator=generator,
         device=device,
         corrupt_field_map=corrupt_field_map,
         corrupt_field_settings=corrupt_field_settings,
+        start_tau=start_tau,
     )
     batch = torch.zeros((int(example["num_nodes"]),), dtype=torch.long, device=device)
     node_types = torch.as_tensor(example["node_types"], dtype=torch.long, device=device).unsqueeze(-1)
@@ -1309,6 +1336,7 @@ def sample_example(
     schedule = _build_sampling_schedule(
         sampler,
         steps=steps,
+        start_scheduler_step=int(start_scheduler_step),
         late_refine_from_step=late_refine_from_step,
         late_refine_factor=late_refine_factor,
         linger_step=linger_step,
@@ -1505,6 +1533,8 @@ def sample_example(
         "split_id": np.asarray(example["split_id"], dtype=np.int64),
         "sampling_sampler": np.asarray(str(sampler_name)),
         "sampling_steps": np.asarray(int(steps), dtype=np.int64),
+        "sampling_start_step": np.asarray(int(start_scheduler_step), dtype=np.int64),
+        "sampling_start_tau": np.asarray(float(start_tau), dtype=np.float32),
         "sampling_late_refine_from_step": np.asarray(int(late_refine_from_step), dtype=np.int64),
         "sampling_late_refine_factor": np.asarray(int(late_refine_factor), dtype=np.int64),
         "sampling_linger_step": np.asarray(int(linger_step), dtype=np.int64),
@@ -1578,6 +1608,13 @@ def main(args: argparse.Namespace | None = None) -> None:
         sampler = FlowMatchingHeunSampler(FlowMatchingScheduler(T=tmax)).to(args.device)
     else:
         sampler = FlowMatchingSampler(FlowMatchingScheduler(T=tmax)).to(args.device)
+    if int(args.start_step) < 0:
+        start_scheduler_step = int(tmax) - 1
+    else:
+        start_scheduler_step = int(args.start_step)
+    if start_scheduler_step < 0 or start_scheduler_step >= int(tmax):
+        raise ValueError(f"--start-step must be in [0, {int(tmax) - 1}] or -1, got {args.start_step}.")
+
     model.to(args.device)
     model.eval()
 
@@ -1599,6 +1636,7 @@ def main(args: argparse.Namespace | None = None) -> None:
             steps=args.steps,
             device=torch.device(args.device),
             seed=args.seed + output_index,
+            start_scheduler_step=start_scheduler_step,
             scalar_normalization=scalar_normalization,
             direct_shape_vector=direct_shape_vector,
             direct_dipole_vector=direct_dipole_vector,

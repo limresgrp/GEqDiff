@@ -1,3 +1,14 @@
+.vscode/
+config/
+old_config/
+deployed/
+sampling_results/
+wandb/
+results/
+samples/
+*.ipynb
+*.html
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

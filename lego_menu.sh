@@ -24,6 +24,7 @@ SAMPLED_DATASET_PATH=""
 CURRENT_PRESET_LABEL=""
 DEFAULT_SOURCE_SAMPLES=""
 DEFAULT_MESH_RESOLUTION=""
+DEFAULT_STRUCTURE_MODE=""
 DEFAULT_OCCUPANCY_MODE=""
 DEFAULT_BASE_RADIUS=""
 DEFAULT_RADIAL_SCALE=""
@@ -31,6 +32,11 @@ DEFAULT_MIN_RADIUS=""
 DEFAULT_MAX_RADIUS=""
 DEFAULT_SHELL_THICKNESS=""
 DEFAULT_SHELL_SPARSITY=""
+DEFAULT_SECONDARY_MOTIF=""
+DEFAULT_SECONDARY_MIN_BRICKS=""
+DEFAULT_SECONDARY_MAX_BRICKS=""
+DEFAULT_SEQUENCE_POS_MAX=""
+DEFAULT_SECONDARY_NONLOCAL_MIN_SEP=""
 
 apply_standard_shell_preset() {
   CURRENT_PRESET_LABEL="standard-shell"
@@ -41,6 +47,7 @@ apply_standard_shell_preset() {
   SAMPLED_DATASET_PATH="${STANDARD_SAMPLED_DATASET}"
   DEFAULT_SOURCE_SAMPLES="100"
   DEFAULT_MESH_RESOLUTION="36"
+  DEFAULT_STRUCTURE_MODE="sh"
   DEFAULT_OCCUPANCY_MODE="shell"
   DEFAULT_BASE_RADIUS="5.0"
   DEFAULT_RADIAL_SCALE="1.55"
@@ -48,6 +55,11 @@ apply_standard_shell_preset() {
   DEFAULT_MAX_RADIUS="10.5"
   DEFAULT_SHELL_THICKNESS="1.1"
   DEFAULT_SHELL_SPARSITY="0.15"
+  DEFAULT_SECONDARY_MOTIF="mixed"
+  DEFAULT_SECONDARY_MIN_BRICKS="16"
+  DEFAULT_SECONDARY_MAX_BRICKS="32"
+  DEFAULT_SEQUENCE_POS_MAX=""
+  DEFAULT_SECONDARY_NONLOCAL_MIN_SEP="4"
 }
 
 apply_small_shell_preset() {
@@ -59,6 +71,7 @@ apply_small_shell_preset() {
   SAMPLED_DATASET_PATH="${SMALL_SAMPLED_DATASET}"
   DEFAULT_SOURCE_SAMPLES="16"
   DEFAULT_MESH_RESOLUTION="36"
+  DEFAULT_STRUCTURE_MODE="sh"
   DEFAULT_OCCUPANCY_MODE="shell"
   DEFAULT_BASE_RADIUS="4.0"
   DEFAULT_RADIAL_SCALE="0.9"
@@ -66,6 +79,11 @@ apply_small_shell_preset() {
   DEFAULT_MAX_RADIUS="7.5"
   DEFAULT_SHELL_THICKNESS="0.9"
   DEFAULT_SHELL_SPARSITY="0.05"
+  DEFAULT_SECONDARY_MOTIF="mixed"
+  DEFAULT_SECONDARY_MIN_BRICKS="12"
+  DEFAULT_SECONDARY_MAX_BRICKS="20"
+  DEFAULT_SEQUENCE_POS_MAX=""
+  DEFAULT_SECONDARY_NONLOCAL_MIN_SEP="4"
 }
 
 apply_standard_shell_preset
@@ -244,6 +262,7 @@ show_defaults() {
   echo "  Sampled dataset      ${SAMPLED_DATASET_PATH}"
   echo "  Source samples       ${DEFAULT_SOURCE_SAMPLES}"
   echo "  Mesh resolution      ${DEFAULT_MESH_RESOLUTION}"
+  echo "  Structure mode       ${DEFAULT_STRUCTURE_MODE}"
   echo "  Occupancy mode       ${DEFAULT_OCCUPANCY_MODE}"
   echo "  Base radius          ${DEFAULT_BASE_RADIUS}"
   echo "  Radial scale         ${DEFAULT_RADIAL_SCALE}"
@@ -251,25 +270,51 @@ show_defaults() {
   echo "  Max radius           ${DEFAULT_MAX_RADIUS}"
   echo "  Shell thickness      ${DEFAULT_SHELL_THICKNESS}"
   echo "  Shell sparsity       ${DEFAULT_SHELL_SPARSITY}"
+  echo "  Secondary motif      ${DEFAULT_SECONDARY_MOTIF}"
+  echo "  Secondary min bricks ${DEFAULT_SECONDARY_MIN_BRICKS}"
+  echo "  Secondary max bricks ${DEFAULT_SECONDARY_MAX_BRICKS}"
+  echo "  Sequence pos max     ${DEFAULT_SEQUENCE_POS_MAX:-auto}"
+  echo "  Secondary nonlocal sep ${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}"
 }
 
 generate_source_dataset() {
-  local samples seed output_path mesh_resolution occupancy_mode shell_thickness shell_sparsity
+  local samples seed output_path mesh_resolution structure_mode occupancy_mode shell_thickness shell_sparsity
   local base_radius radial_scale min_radius max_radius
+  local secondary_motif secondary_min_bricks secondary_max_bricks sequence_pos_max secondary_nonlocal_min_sep
   samples="$(prompt_with_default "Number of source LEGO examples" "${DEFAULT_SOURCE_SAMPLES}")"
   seed="$(prompt_with_default "Random seed" "13")"
   output_path="$(prompt_with_default "Output source dataset path" "${SOURCE_DATASET_PATH}")"
+  structure_mode="$(prompt_with_default "Structure mode (sh or secondary)" "${DEFAULT_STRUCTURE_MODE}")"
   mesh_resolution="$(prompt_with_default "Mesh resolution" "${DEFAULT_MESH_RESOLUTION}")"
-  occupancy_mode="$(prompt_with_default "Occupancy mode (solid or shell)" "${DEFAULT_OCCUPANCY_MODE}")"
-  base_radius="$(prompt_with_default "Base radius" "${DEFAULT_BASE_RADIUS}")"
-  radial_scale="$(prompt_with_default "Radial scale" "${DEFAULT_RADIAL_SCALE}")"
-  min_radius="$(prompt_with_default "Min radius" "${DEFAULT_MIN_RADIUS}")"
-  max_radius="$(prompt_with_default "Max radius" "${DEFAULT_MAX_RADIUS}")"
+  occupancy_mode="${DEFAULT_OCCUPANCY_MODE}"
+  base_radius="${DEFAULT_BASE_RADIUS}"
+  radial_scale="${DEFAULT_RADIAL_SCALE}"
+  min_radius="${DEFAULT_MIN_RADIUS}"
+  max_radius="${DEFAULT_MAX_RADIUS}"
   shell_thickness="${DEFAULT_SHELL_THICKNESS}"
   shell_sparsity="${DEFAULT_SHELL_SPARSITY}"
-  if [[ "${occupancy_mode}" == "shell" ]]; then
-    shell_thickness="$(prompt_with_default "Shell thickness" "${DEFAULT_SHELL_THICKNESS}")"
-    shell_sparsity="$(prompt_with_default "Shell sparsity [0-0.95]" "${DEFAULT_SHELL_SPARSITY}")"
+  secondary_motif="${DEFAULT_SECONDARY_MOTIF}"
+  secondary_min_bricks="${DEFAULT_SECONDARY_MIN_BRICKS}"
+  secondary_max_bricks="${DEFAULT_SECONDARY_MAX_BRICKS}"
+  sequence_pos_max="${DEFAULT_SEQUENCE_POS_MAX}"
+  secondary_nonlocal_min_sep="${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}"
+
+  if [[ "${structure_mode}" == "secondary" ]]; then
+    secondary_motif="$(prompt_with_default "Secondary motif (mixed/helix/sheet)" "${DEFAULT_SECONDARY_MOTIF}")"
+    secondary_min_bricks="$(prompt_with_default "Secondary min bricks" "${DEFAULT_SECONDARY_MIN_BRICKS}")"
+    secondary_max_bricks="$(prompt_with_default "Secondary max bricks" "${DEFAULT_SECONDARY_MAX_BRICKS}")"
+    sequence_pos_max="$(prompt_with_default "Sequence position max (blank=auto)" "${DEFAULT_SEQUENCE_POS_MAX}")"
+    secondary_nonlocal_min_sep="$(prompt_with_default "Secondary nonlocal min sequence separation" "${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}")"
+  else
+    occupancy_mode="$(prompt_with_default "Occupancy mode (solid or shell)" "${DEFAULT_OCCUPANCY_MODE}")"
+    base_radius="$(prompt_with_default "Base radius" "${DEFAULT_BASE_RADIUS}")"
+    radial_scale="$(prompt_with_default "Radial scale" "${DEFAULT_RADIAL_SCALE}")"
+    min_radius="$(prompt_with_default "Min radius" "${DEFAULT_MIN_RADIUS}")"
+    max_radius="$(prompt_with_default "Max radius" "${DEFAULT_MAX_RADIUS}")"
+    if [[ "${occupancy_mode}" == "shell" ]]; then
+      shell_thickness="$(prompt_with_default "Shell thickness" "${DEFAULT_SHELL_THICKNESS}")"
+      shell_sparsity="$(prompt_with_default "Shell sparsity [0-0.95]" "${DEFAULT_SHELL_SPARSITY}")"
+    fi
   fi
 
   if ! confirm_overwrite "${output_path}"; then
@@ -278,18 +323,29 @@ generate_source_dataset() {
   fi
 
   mkdir -p "$(dirname "${output_path}")"
-  if run_cmd "${PYTHON_CMD}" "${ROOT_DIR}/lego/lego_engine.py" \
-    --samples "${samples}" \
-    --seed "${seed}" \
-    --path "${output_path}" \
-    --mesh-resolution "${mesh_resolution}" \
-    --base-radius "${base_radius}" \
-    --radial-scale "${radial_scale}" \
-    --min-radius "${min_radius}" \
-    --max-radius "${max_radius}" \
-    --occupancy-mode "${occupancy_mode}" \
-    --shell-thickness "${shell_thickness}" \
-    --shell-sparsity "${shell_sparsity}"; then
+  local cmd=(
+    "${PYTHON_CMD}" "${ROOT_DIR}/lego/lego_engine.py"
+    --samples "${samples}"
+    --seed "${seed}"
+    --path "${output_path}"
+    --mesh-resolution "${mesh_resolution}"
+    --structure-mode "${structure_mode}"
+    --base-radius "${base_radius}"
+    --radial-scale "${radial_scale}"
+    --min-radius "${min_radius}"
+    --max-radius "${max_radius}"
+    --occupancy-mode "${occupancy_mode}"
+    --shell-thickness "${shell_thickness}"
+    --shell-sparsity "${shell_sparsity}"
+    --secondary-motif "${secondary_motif}"
+    --secondary-min-bricks "${secondary_min_bricks}"
+    --secondary-max-bricks "${secondary_max_bricks}"
+    --secondary-nonlocal-min-sep "${secondary_nonlocal_min_sep}"
+  )
+  if [[ -n "${sequence_pos_max}" ]]; then
+    cmd+=(--sequence-pos-max "${sequence_pos_max}")
+  fi
+  if run_cmd "${cmd[@]}"; then
     SOURCE_DATASET_PATH="${output_path}"
   fi
 }
@@ -336,14 +392,27 @@ generate_diffusion_dataset() {
 }
 
 inspect_diffusion_dataset() {
-  local input_path index
+  local input_path indices output_html output_html_default designable_label context_label
   input_path="$(prompt_with_default "Diffusion dataset path to inspect" "${DIFFUSION_DATASET_PATH}")"
-  index="$(prompt_with_default "Detailed example index (blank for summary only)" "")"
-
-  local cmd=("${PYTHON_CMD}" "${ROOT_DIR}/geqdiff/scripts/inspect_diffusion_dataset.py" --input "${input_path}")
-  if [[ -n "${index}" ]]; then
-    cmd+=(--index "${index}")
+  indices="$(prompt_with_default "Example indices to plot (comma-separated, blank = all)" "")"
+  if [[ "${input_path}" == *.npz ]]; then
+    output_html_default="${input_path%.npz}.html"
+  else
+    output_html_default="${input_path}.html"
   fi
+  output_html="$(prompt_with_default "HTML output path" "${output_html_default}")"
+  designable_label="Designable set"
+  context_label="Context set"
+
+  local cmd=(
+    "${PYTHON_CMD}" "${ROOT_DIR}/geqdiff/scripts/inspect_diffusion_dataset.py"
+    --input "${input_path}"
+    --indices "${indices}"
+    --plot-html "${output_html}"
+    --designable-label "${designable_label}"
+    --context-label "${context_label}"
+    --no-open-html
+  )
 
   run_cmd "${cmd[@]}"
 }
@@ -371,7 +440,7 @@ train_lego_model() {
 }
 
 sample_lego_blocks() {
-  local latest_model model_path input_path output_path source_path metrics_json num_samples steps sampler_name late_refine_from_step late_refine_factor linger_step linger_count clash_guidance clash_guidance_strength clash_guidance_max_norm clash_guidance_weight_schedule clash_guidance_auto_scale clash_guidance_auto_scale_min clash_guidance_auto_scale_max cohesion_guidance_strength cohesion_guidance_target_contacts save_metrics device seed indices_raw save_intermediates use_refinement use_linger use_guidance use_cohesion
+  local latest_model model_path input_path output_path source_path metrics_json num_samples steps sampler_name start_step late_refine_from_step late_refine_factor linger_step linger_count clash_guidance clash_guidance_strength clash_guidance_max_norm clash_guidance_weight_schedule clash_guidance_auto_scale clash_guidance_auto_scale_min clash_guidance_auto_scale_max cohesion_guidance_strength cohesion_guidance_target_contacts save_metrics device seed indices_raw save_intermediates use_refinement use_linger use_guidance use_cohesion use_partial_start
   latest_model="$(latest_named_file "${RESULTS_ROOT_PATH}" "best_model.pth")"
   model_path="$(prompt_with_default "Checkpoint path" "${latest_model}")"
   input_path="$(prompt_with_default "Input diffusion dataset path" "${DIFFUSION_DATASET_PATH}")"
@@ -381,6 +450,13 @@ sample_lego_blocks() {
   num_samples="$(prompt_with_default "Number of samples to draw" "4")"
   steps="$(prompt_with_default "Reverse integration steps" "20")"
   sampler_name="$(prompt_with_default "Flow-matching sampler (heun/euler)" "heun")"
+  if prompt_yes_no "Start from a partially noised state?" "n"; then
+    use_partial_start="y"
+    start_step="$(prompt_with_default "Initial scheduler step (0 = clean, 99 = near full-noise for T=100)" "50")"
+  else
+    use_partial_start="n"
+    start_step="-1"
+  fi
 
   if prompt_yes_no "Enable late refinement (substeps near low tau)?" "n"; then
     use_refinement="y"
@@ -476,6 +552,9 @@ sample_lego_blocks() {
   )
   if [[ "${use_refinement}" == "y" ]]; then
     cmd+=(--late-refine-from-step "${late_refine_from_step}" --late-refine-factor "${late_refine_factor}")
+  fi
+  if [[ "${use_partial_start}" == "y" ]]; then
+    cmd+=(--start-step "${start_step}")
   fi
   if [[ "${use_linger}" == "y" ]]; then
     cmd+=(--linger-step "${linger_step}" --linger-count "${linger_count}")
