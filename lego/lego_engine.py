@@ -45,6 +45,7 @@ class LegoDipoleEngine:
         secondary_min_polar_fraction=0.24,
         secondary_max_consecutive_polar=2,
         secondary_polar_min_spacing=3,
+        secondary_dipole_interaction_range=3.0,
         sequence_pos_max=None,
     ):
         if lmax != 3:
@@ -76,6 +77,7 @@ class LegoDipoleEngine:
         )
         self.secondary_max_consecutive_polar = int(max(1, secondary_max_consecutive_polar))
         self.secondary_polar_min_spacing = int(max(1, secondary_polar_min_spacing))
+        self.secondary_dipole_interaction_range = float(max(1.0, secondary_dipole_interaction_range))
         self.sequence_pos_max = int(sequence_pos_max) if sequence_pos_max is not None else int(self.secondary_max_bricks)
         self.sequence_pos_max = int(max(2, self.sequence_pos_max))
 
@@ -829,7 +831,7 @@ class LegoDipoleEngine:
         return selected.astype(bool)
 
     def _assign_secondary_dipoles(self, sample, sequence_positions, brick_sheet_strand_ids=None):
-        def _distance_weight(distance: float, scale: float = 3.8) -> float:
+        def _distance_weight(distance: float, scale: float) -> float:
             d = float(max(distance, 0.0))
             s = float(max(1e-3, scale))
             return float(1.0 / (1.0 + (d / s) ** 2))
@@ -936,7 +938,7 @@ class LegoDipoleEngine:
             min_spacing=self.secondary_polar_min_spacing,
             centers=centers,
             closeness_weight=1.1,
-            closeness_distance_scale=3.8,
+            closeness_distance_scale=self.secondary_dipole_interaction_range,
         )
 
         selected_idx = np.flatnonzero(selected).astype(np.int32)
@@ -955,7 +957,7 @@ class LegoDipoleEngine:
             if dist <= 1e-8:
                 continue
             u = (vec / dist).astype(np.float32)
-            w = 1.8 * _distance_weight(dist) + 0.6
+            w = 1.8 * _distance_weight(dist, scale=self.secondary_dipole_interaction_range) + 0.6
             if key not in pair_terms:
                 pair_terms[key] = {"u": u, "w": float(w)}
             else:
@@ -972,13 +974,13 @@ class LegoDipoleEngine:
                     continue
                 rel = centers[int(j)] - centers[int(i)]
                 dist = float(np.linalg.norm(rel))
-                if dist <= 1e-8 or dist > 6.8:
+                if dist <= 1e-8 or dist > float(self.secondary_dipole_interaction_range):
                     continue
                 seq_sep = abs(int(sequence_positions[int(i)]) - int(sequence_positions[int(j)]))
                 if seq_sep < max(2, self.secondary_nonlocal_min_sep - 2):
                     continue
                 u = (rel / dist).astype(np.float32)
-                w = 1.25 * _distance_weight(dist)
+                w = 1.25 * _distance_weight(dist, scale=self.secondary_dipole_interaction_range)
                 pair_terms[key] = {"u": u, "w": float(w)}
 
         adjacency = {int(i): [] for i in selected_idx.tolist()}
@@ -1337,6 +1339,7 @@ class LegoDipoleEngine:
             "sequence_pos_max": np.asarray(self.sequence_pos_max, dtype=np.int32),
             "secondary_motif": np.asarray(str(motif)),
             "secondary_recipe": np.asarray(str(secondary_recipe)),
+            "secondary_dipole_interaction_range": np.asarray(self.secondary_dipole_interaction_range, dtype=np.float32),
             "occupancy_mode": np.asarray("secondary"),
             "generation_mode": np.asarray("secondary"),
             # Compatibility aliases.
@@ -1458,6 +1461,15 @@ def parse_args():
         default=3,
         help="Minimum spacing in sequence order between polar bricks (3 means at most one polar every three).",
     )
+    parser.add_argument(
+        "--secondary-dipole-interaction-range",
+        type=float,
+        default=3.0,
+        help=(
+            "Dipole interaction range in LEGO lattice units for secondary mode "
+            "(1 unit = one voxel edge; often treated as ~1 Å in this synthetic setup)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1482,6 +1494,7 @@ if __name__ == "__main__":
         secondary_min_polar_fraction=args.secondary_min_polar_fraction,
         secondary_max_consecutive_polar=args.secondary_max_consecutive_polar,
         secondary_polar_min_spacing=args.secondary_polar_min_spacing,
+        secondary_dipole_interaction_range=args.secondary_dipole_interaction_range,
         sequence_pos_max=args.sequence_pos_max,
     )
     samples = engine.generate_dataset(n_samples=args.samples, seed=args.seed)

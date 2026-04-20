@@ -37,6 +37,7 @@ DEFAULT_SECONDARY_MIN_BRICKS=""
 DEFAULT_SECONDARY_MAX_BRICKS=""
 DEFAULT_SEQUENCE_POS_MAX=""
 DEFAULT_SECONDARY_NONLOCAL_MIN_SEP=""
+DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE=""
 
 apply_standard_shell_preset() {
   CURRENT_PRESET_LABEL="standard-shell"
@@ -60,6 +61,7 @@ apply_standard_shell_preset() {
   DEFAULT_SECONDARY_MAX_BRICKS="32"
   DEFAULT_SEQUENCE_POS_MAX=""
   DEFAULT_SECONDARY_NONLOCAL_MIN_SEP="4"
+  DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE="3.0"
 }
 
 apply_small_shell_preset() {
@@ -84,6 +86,7 @@ apply_small_shell_preset() {
   DEFAULT_SECONDARY_MAX_BRICKS="20"
   DEFAULT_SEQUENCE_POS_MAX=""
   DEFAULT_SECONDARY_NONLOCAL_MIN_SEP="4"
+  DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE="3.0"
 }
 
 apply_standard_shell_preset
@@ -275,12 +278,14 @@ show_defaults() {
   echo "  Secondary max bricks ${DEFAULT_SECONDARY_MAX_BRICKS}"
   echo "  Sequence pos max     ${DEFAULT_SEQUENCE_POS_MAX:-auto}"
   echo "  Secondary nonlocal sep ${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}"
+  echo "  Secondary dipole interaction range ${DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE}"
 }
 
 generate_source_dataset() {
   local samples seed output_path mesh_resolution structure_mode occupancy_mode shell_thickness shell_sparsity
   local base_radius radial_scale min_radius max_radius
   local secondary_motif secondary_min_bricks secondary_max_bricks sequence_pos_max secondary_nonlocal_min_sep
+  local secondary_dipole_interaction_range
   samples="$(prompt_with_default "Number of source LEGO examples" "${DEFAULT_SOURCE_SAMPLES}")"
   seed="$(prompt_with_default "Random seed" "13")"
   output_path="$(prompt_with_default "Output source dataset path" "${SOURCE_DATASET_PATH}")"
@@ -298,6 +303,7 @@ generate_source_dataset() {
   secondary_max_bricks="${DEFAULT_SECONDARY_MAX_BRICKS}"
   sequence_pos_max="${DEFAULT_SEQUENCE_POS_MAX}"
   secondary_nonlocal_min_sep="${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}"
+  secondary_dipole_interaction_range="${DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE}"
 
   if [[ "${structure_mode}" == "secondary" ]]; then
     secondary_motif="$(prompt_with_default "Secondary motif (mixed/helix/sheet)" "${DEFAULT_SECONDARY_MOTIF}")"
@@ -305,6 +311,7 @@ generate_source_dataset() {
     secondary_max_bricks="$(prompt_with_default "Secondary max bricks" "${DEFAULT_SECONDARY_MAX_BRICKS}")"
     sequence_pos_max="$(prompt_with_default "Sequence position max (blank=auto)" "${DEFAULT_SEQUENCE_POS_MAX}")"
     secondary_nonlocal_min_sep="$(prompt_with_default "Secondary nonlocal min sequence separation" "${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}")"
+    secondary_dipole_interaction_range="$(prompt_with_default "Secondary dipole interaction range (lattice units)" "${DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE}")"
   else
     occupancy_mode="$(prompt_with_default "Occupancy mode (solid or shell)" "${DEFAULT_OCCUPANCY_MODE}")"
     base_radius="$(prompt_with_default "Base radius" "${DEFAULT_BASE_RADIUS}")"
@@ -341,6 +348,7 @@ generate_source_dataset() {
     --secondary-min-bricks "${secondary_min_bricks}"
     --secondary-max-bricks "${secondary_max_bricks}"
     --secondary-nonlocal-min-sep "${secondary_nonlocal_min_sep}"
+    --secondary-dipole-interaction-range "${secondary_dipole_interaction_range}"
   )
   if [[ -n "${sequence_pos_max}" ]]; then
     cmd+=(--sequence-pos-max "${sequence_pos_max}")
