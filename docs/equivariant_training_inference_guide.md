@@ -95,9 +95,6 @@ At each step:
 4. Integrate (Euler or Heun):
    - `x_next = x + (tau_next - tau) * v_pred`
 5. Merge updates only on masked nodes (`ligand_mask` usually).
-6. If `project_normalized_states: true`, renormalize:
-   - shape equiv blocks to unit norm
-   - dipole direction to unit norm
 
 At decode, normalization is applied again before exporting brick descriptors.
 
@@ -115,9 +112,6 @@ With directional coupling configured on dipole:
 - target direction block is normalized to unit direction.
 - target strength scalar is replaced by that direction-block norm.
 
-During sampling:
-- if `project_normalized_states: true`, `dipole_direction` is projected to unit norm after each step.
-
 ## 8) What parameters actually control
 
 - `corrupt_fields[].mask_field`
@@ -130,15 +124,12 @@ During sampling:
   - activates direction/magnitude decomposition for both targets (training) and predictions (sampling).
 - `normalize_equivariant_output` (per readout head)
   - forces predicted equivariant block norm to 1 (except near-zero blocks).
-- `project_normalized_states` (sampling only)
-  - projects latent state back to unit-direction manifold after each update.
 
 ## 9) Configuration guidance to avoid common mismatches
 
 ### A) Pure continuous velocity learning (simpler baseline)
 - `normalize_equivariant_output: false`
 - `directional_velocity_couplings: []`
-- `project_normalized_states: false` during rollout
 - Keep final decode normalization only.
 
 Use this when you want model to learn unconstrained continuous velocities.
@@ -147,7 +138,6 @@ Use this when you want model to learn unconstrained continuous velocities.
 - `normalize_equivariant_output: true` on equivariant heads
 - enable `directional_velocity_couplings`
 - use scalar heads/losses as magnitude channels
-- be careful with `project_normalized_states`: it changes rollout dynamics vs raw linear FM state updates.
 
 If using this mode, keep train/inference conventions consistent and verify endpoint reconstruction, not only velocity loss.
 
@@ -155,7 +145,6 @@ If using this mode, keep train/inference conventions consistent and verify endpo
 
 1. Confirm `corrupt_field_map` inferred from checkpoint equals what you intended to diffuse.
 2. Print inferred `directional_velocity_couplings` at sampling.
-3. Check if `project_normalized_states` is on; test both on/off.
-4. Verify loss masks use `ligand_mask` (or intended mask) and directional validity.
-5. Compare trajectory MSE from noise to final state, not just train loss.
+3. Verify loss masks use `ligand_mask` (or intended mask) and directional validity.
+4. Compare trajectory MSE from noise to final state, not just train loss.
 

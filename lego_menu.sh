@@ -4,17 +4,17 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
-STANDARD_SOURCE_DATASET="${ROOT_DIR}/lego/lego_dataset_shell.npz"
-STANDARD_DIFFUSION_DATASET="${ROOT_DIR}/lego/lego_diffusion_dataset_shell.npz"
-STANDARD_EXPERIMENT_CONFIG="${ROOT_DIR}/config/experiment/lego_flow_matching_shell.yaml"
+STANDARD_SOURCE_DATASET="${ROOT_DIR}/lego/lego_dataset_scaffold.npz"
+STANDARD_DIFFUSION_DATASET="${ROOT_DIR}/lego/lego_diffusion_dataset_scaffold.npz"
+STANDARD_EXPERIMENT_CONFIG="${ROOT_DIR}/config/lego/experiment/flow_secondary.yaml"
 STANDARD_RESULTS_ROOT="${ROOT_DIR}/results/lego"
-STANDARD_SAMPLED_DATASET="${ROOT_DIR}/lego/lego_sampled_shell_dataset.npz"
+STANDARD_SAMPLED_DATASET="${ROOT_DIR}/lego/lego_sampled_scaffold_dataset.npz"
 
-SMALL_SOURCE_DATASET="${ROOT_DIR}/lego/lego_dataset_shell_small.npz"
-SMALL_DIFFUSION_DATASET="${ROOT_DIR}/lego/lego_diffusion_dataset_shell_small.npz"
-SMALL_EXPERIMENT_CONFIG="${ROOT_DIR}/config/experiment/lego_flow_matching_shell_small_tiny.yaml"
+SMALL_SOURCE_DATASET="${ROOT_DIR}/lego/lego_dataset_scaffold_tiny.npz"
+SMALL_DIFFUSION_DATASET="${ROOT_DIR}/lego/lego_diffusion_dataset_scaffold_tiny.npz"
+SMALL_EXPERIMENT_CONFIG="${ROOT_DIR}/config/lego/experiment/flow_secondary_shapeonly.yaml"
 SMALL_RESULTS_ROOT="${ROOT_DIR}/results/lego"
-SMALL_SAMPLED_DATASET="${ROOT_DIR}/lego/lego_sampled_shell_small_dataset.npz"
+SMALL_SAMPLED_DATASET="${ROOT_DIR}/lego/lego_sampled_scaffold_tiny_dataset.npz"
 
 SOURCE_DATASET_PATH=""
 DIFFUSION_DATASET_PATH=""
@@ -23,73 +23,61 @@ RESULTS_ROOT_PATH=""
 SAMPLED_DATASET_PATH=""
 CURRENT_PRESET_LABEL=""
 DEFAULT_SOURCE_SAMPLES=""
-DEFAULT_MESH_RESOLUTION=""
-DEFAULT_STRUCTURE_MODE=""
-DEFAULT_OCCUPANCY_MODE=""
-DEFAULT_BASE_RADIUS=""
-DEFAULT_RADIAL_SCALE=""
-DEFAULT_MIN_RADIUS=""
-DEFAULT_MAX_RADIUS=""
-DEFAULT_SHELL_THICKNESS=""
-DEFAULT_SHELL_SPARSITY=""
-DEFAULT_SECONDARY_MOTIF=""
-DEFAULT_SECONDARY_MIN_BRICKS=""
-DEFAULT_SECONDARY_MAX_BRICKS=""
+DEFAULT_SCAFFOLD_FAMILY=""
+DEFAULT_MIN_NODES=""
+DEFAULT_MAX_NODES=""
+DEFAULT_BIFURCATION_PROBABILITY=""
+DEFAULT_HELIX_PHASE_PERIOD=""
+DEFAULT_TAU_STRAIGHT=""
+DEFAULT_TAU_PLANAR=""
+DEFAULT_TAU_JUNCTION_DEGREE=""
 DEFAULT_SEQUENCE_POS_MAX=""
-DEFAULT_SECONDARY_NONLOCAL_MIN_SEP=""
-DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE=""
+DEFAULT_SHAPE_NOISE_SCALE=""
+DEFAULT_DIPOLE_NOISE_SCALE=""
 
-apply_standard_shell_preset() {
-  CURRENT_PRESET_LABEL="standard-shell"
+apply_standard_scaffold_preset() {
+  CURRENT_PRESET_LABEL="standard-scaffold"
   SOURCE_DATASET_PATH="${STANDARD_SOURCE_DATASET}"
   DIFFUSION_DATASET_PATH="${STANDARD_DIFFUSION_DATASET}"
   EXPERIMENT_CONFIG_PATH="${STANDARD_EXPERIMENT_CONFIG}"
   RESULTS_ROOT_PATH="${STANDARD_RESULTS_ROOT}"
   SAMPLED_DATASET_PATH="${STANDARD_SAMPLED_DATASET}"
   DEFAULT_SOURCE_SAMPLES="100"
-  DEFAULT_MESH_RESOLUTION="36"
-  DEFAULT_STRUCTURE_MODE="sh"
-  DEFAULT_OCCUPANCY_MODE="shell"
-  DEFAULT_BASE_RADIUS="5.0"
-  DEFAULT_RADIAL_SCALE="1.55"
-  DEFAULT_MIN_RADIUS="3.5"
-  DEFAULT_MAX_RADIUS="10.5"
-  DEFAULT_SHELL_THICKNESS="1.1"
-  DEFAULT_SHELL_SPARSITY="0.15"
-  DEFAULT_SECONDARY_MOTIF="mixed"
-  DEFAULT_SECONDARY_MIN_BRICKS="16"
-  DEFAULT_SECONDARY_MAX_BRICKS="32"
+  DEFAULT_SCAFFOLD_FAMILY="mixed"
+  DEFAULT_MIN_NODES="18"
+  DEFAULT_MAX_NODES="40"
+  DEFAULT_BIFURCATION_PROBABILITY="0.45"
+  DEFAULT_HELIX_PHASE_PERIOD="4"
+  DEFAULT_TAU_STRAIGHT="0.35"
+  DEFAULT_TAU_PLANAR="0.34"
+  DEFAULT_TAU_JUNCTION_DEGREE="3"
   DEFAULT_SEQUENCE_POS_MAX=""
-  DEFAULT_SECONDARY_NONLOCAL_MIN_SEP="4"
-  DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE="3.0"
+  DEFAULT_SHAPE_NOISE_SCALE="0.0"
+  DEFAULT_DIPOLE_NOISE_SCALE="0.0"
 }
 
-apply_small_shell_preset() {
-  CURRENT_PRESET_LABEL="small-shell-overfit"
+apply_tiny_scaffold_preset() {
+  CURRENT_PRESET_LABEL="tiny-scaffold-overfit"
   SOURCE_DATASET_PATH="${SMALL_SOURCE_DATASET}"
   DIFFUSION_DATASET_PATH="${SMALL_DIFFUSION_DATASET}"
   EXPERIMENT_CONFIG_PATH="${SMALL_EXPERIMENT_CONFIG}"
   RESULTS_ROOT_PATH="${SMALL_RESULTS_ROOT}"
   SAMPLED_DATASET_PATH="${SMALL_SAMPLED_DATASET}"
   DEFAULT_SOURCE_SAMPLES="16"
-  DEFAULT_MESH_RESOLUTION="36"
-  DEFAULT_STRUCTURE_MODE="sh"
-  DEFAULT_OCCUPANCY_MODE="shell"
-  DEFAULT_BASE_RADIUS="4.0"
-  DEFAULT_RADIAL_SCALE="0.9"
-  DEFAULT_MIN_RADIUS="2.75"
-  DEFAULT_MAX_RADIUS="7.5"
-  DEFAULT_SHELL_THICKNESS="0.9"
-  DEFAULT_SHELL_SPARSITY="0.05"
-  DEFAULT_SECONDARY_MOTIF="mixed"
-  DEFAULT_SECONDARY_MIN_BRICKS="12"
-  DEFAULT_SECONDARY_MAX_BRICKS="20"
+  DEFAULT_SCAFFOLD_FAMILY="mixed"
+  DEFAULT_MIN_NODES="10"
+  DEFAULT_MAX_NODES="16"
+  DEFAULT_BIFURCATION_PROBABILITY="0.30"
+  DEFAULT_HELIX_PHASE_PERIOD="4"
+  DEFAULT_TAU_STRAIGHT="0.30"
+  DEFAULT_TAU_PLANAR="0.30"
+  DEFAULT_TAU_JUNCTION_DEGREE="3"
   DEFAULT_SEQUENCE_POS_MAX=""
-  DEFAULT_SECONDARY_NONLOCAL_MIN_SEP="4"
-  DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE="3.0"
+  DEFAULT_SHAPE_NOISE_SCALE="0.0"
+  DEFAULT_DIPOLE_NOISE_SCALE="0.0"
 }
 
-apply_standard_shell_preset
+apply_standard_scaffold_preset
 
 find_python() {
   if [[ -n "${PYTHON_BIN:-}" && -x "${PYTHON_BIN}" ]]; then
@@ -264,65 +252,39 @@ show_defaults() {
   echo "  Results root         ${RESULTS_ROOT_PATH}"
   echo "  Sampled dataset      ${SAMPLED_DATASET_PATH}"
   echo "  Source samples       ${DEFAULT_SOURCE_SAMPLES}"
-  echo "  Mesh resolution      ${DEFAULT_MESH_RESOLUTION}"
-  echo "  Structure mode       ${DEFAULT_STRUCTURE_MODE}"
-  echo "  Occupancy mode       ${DEFAULT_OCCUPANCY_MODE}"
-  echo "  Base radius          ${DEFAULT_BASE_RADIUS}"
-  echo "  Radial scale         ${DEFAULT_RADIAL_SCALE}"
-  echo "  Min radius           ${DEFAULT_MIN_RADIUS}"
-  echo "  Max radius           ${DEFAULT_MAX_RADIUS}"
-  echo "  Shell thickness      ${DEFAULT_SHELL_THICKNESS}"
-  echo "  Shell sparsity       ${DEFAULT_SHELL_SPARSITY}"
-  echo "  Secondary motif      ${DEFAULT_SECONDARY_MOTIF}"
-  echo "  Secondary min bricks ${DEFAULT_SECONDARY_MIN_BRICKS}"
-  echo "  Secondary max bricks ${DEFAULT_SECONDARY_MAX_BRICKS}"
+  echo "  Scaffold family      ${DEFAULT_SCAFFOLD_FAMILY}"
+  echo "  Min nodes            ${DEFAULT_MIN_NODES}"
+  echo "  Max nodes            ${DEFAULT_MAX_NODES}"
+  echo "  Bifurcation prob     ${DEFAULT_BIFURCATION_PROBABILITY}"
+  echo "  Helix phase period   ${DEFAULT_HELIX_PHASE_PERIOD}"
+  echo "  Tau straight         ${DEFAULT_TAU_STRAIGHT}"
+  echo "  Tau planar           ${DEFAULT_TAU_PLANAR}"
+  echo "  Tau junction degree  ${DEFAULT_TAU_JUNCTION_DEGREE}"
   echo "  Sequence pos max     ${DEFAULT_SEQUENCE_POS_MAX:-auto}"
-  echo "  Secondary nonlocal sep ${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}"
-  echo "  Secondary dipole interaction range ${DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE}"
+  echo "  Shape noise scale    ${DEFAULT_SHAPE_NOISE_SCALE}"
+  echo "  Dipole noise scale   ${DEFAULT_DIPOLE_NOISE_SCALE}"
 }
 
 generate_source_dataset() {
-  local samples seed output_path mesh_resolution structure_mode occupancy_mode shell_thickness shell_sparsity
-  local base_radius radial_scale min_radius max_radius
-  local secondary_motif secondary_min_bricks secondary_max_bricks sequence_pos_max secondary_nonlocal_min_sep
-  local secondary_dipole_interaction_range
+  local samples seed output_path scaffold_family min_nodes max_nodes sequence_pos_max
+  local bifurcation_probability helix_phase_period tau_straight tau_planar tau_junction_degree
+  local shape_noise_scale dipole_noise_scale
+
   samples="$(prompt_with_default "Number of source LEGO examples" "${DEFAULT_SOURCE_SAMPLES}")"
   seed="$(prompt_with_default "Random seed" "13")"
   output_path="$(prompt_with_default "Output source dataset path" "${SOURCE_DATASET_PATH}")"
-  structure_mode="$(prompt_with_default "Structure mode (sh or secondary)" "${DEFAULT_STRUCTURE_MODE}")"
-  mesh_resolution="$(prompt_with_default "Mesh resolution" "${DEFAULT_MESH_RESOLUTION}")"
-  occupancy_mode="${DEFAULT_OCCUPANCY_MODE}"
-  base_radius="${DEFAULT_BASE_RADIUS}"
-  radial_scale="${DEFAULT_RADIAL_SCALE}"
-  min_radius="${DEFAULT_MIN_RADIUS}"
-  max_radius="${DEFAULT_MAX_RADIUS}"
-  shell_thickness="${DEFAULT_SHELL_THICKNESS}"
-  shell_sparsity="${DEFAULT_SHELL_SPARSITY}"
-  secondary_motif="${DEFAULT_SECONDARY_MOTIF}"
-  secondary_min_bricks="${DEFAULT_SECONDARY_MIN_BRICKS}"
-  secondary_max_bricks="${DEFAULT_SECONDARY_MAX_BRICKS}"
+  scaffold_family="$(prompt_with_default "Scaffold family (mixed/chain/alpha_helix/sheet/junction)" "${DEFAULT_SCAFFOLD_FAMILY}")"
+  min_nodes="$(prompt_with_default "Minimum nodes per sample" "${DEFAULT_MIN_NODES}")"
+  max_nodes="$(prompt_with_default "Maximum nodes per sample" "${DEFAULT_MAX_NODES}")"
+  bifurcation_probability="$(prompt_with_default "Bifurcation probability (for mixed)" "${DEFAULT_BIFURCATION_PROBABILITY}")"
+  helix_phase_period="$(prompt_with_default "Helix phase period" "${DEFAULT_HELIX_PHASE_PERIOD}")"
+  tau_straight="$(prompt_with_default "Tau straight threshold" "${DEFAULT_TAU_STRAIGHT}")"
+  tau_planar="$(prompt_with_default "Tau planar threshold" "${DEFAULT_TAU_PLANAR}")"
+  tau_junction_degree="$(prompt_with_default "Tau junction degree threshold" "${DEFAULT_TAU_JUNCTION_DEGREE}")"
+  shape_noise_scale="$(prompt_with_default "Shape noise scale" "${DEFAULT_SHAPE_NOISE_SCALE}")"
+  dipole_noise_scale="$(prompt_with_default "Dipole noise scale" "${DEFAULT_DIPOLE_NOISE_SCALE}")"
   sequence_pos_max="${DEFAULT_SEQUENCE_POS_MAX}"
-  secondary_nonlocal_min_sep="${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}"
-  secondary_dipole_interaction_range="${DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE}"
-
-  if [[ "${structure_mode}" == "secondary" ]]; then
-    secondary_motif="$(prompt_with_default "Secondary motif (mixed/helix/sheet)" "${DEFAULT_SECONDARY_MOTIF}")"
-    secondary_min_bricks="$(prompt_with_default "Secondary min bricks" "${DEFAULT_SECONDARY_MIN_BRICKS}")"
-    secondary_max_bricks="$(prompt_with_default "Secondary max bricks" "${DEFAULT_SECONDARY_MAX_BRICKS}")"
-    sequence_pos_max="$(prompt_with_default "Sequence position max (blank=auto)" "${DEFAULT_SEQUENCE_POS_MAX}")"
-    secondary_nonlocal_min_sep="$(prompt_with_default "Secondary nonlocal min sequence separation" "${DEFAULT_SECONDARY_NONLOCAL_MIN_SEP}")"
-    secondary_dipole_interaction_range="$(prompt_with_default "Secondary dipole interaction range (lattice units)" "${DEFAULT_SECONDARY_DIPOLE_INTERACTION_RANGE}")"
-  else
-    occupancy_mode="$(prompt_with_default "Occupancy mode (solid or shell)" "${DEFAULT_OCCUPANCY_MODE}")"
-    base_radius="$(prompt_with_default "Base radius" "${DEFAULT_BASE_RADIUS}")"
-    radial_scale="$(prompt_with_default "Radial scale" "${DEFAULT_RADIAL_SCALE}")"
-    min_radius="$(prompt_with_default "Min radius" "${DEFAULT_MIN_RADIUS}")"
-    max_radius="$(prompt_with_default "Max radius" "${DEFAULT_MAX_RADIUS}")"
-    if [[ "${occupancy_mode}" == "shell" ]]; then
-      shell_thickness="$(prompt_with_default "Shell thickness" "${DEFAULT_SHELL_THICKNESS}")"
-      shell_sparsity="$(prompt_with_default "Shell sparsity [0-0.95]" "${DEFAULT_SHELL_SPARSITY}")"
-    fi
-  fi
+  sequence_pos_max="$(prompt_with_default "Sequence position max (blank=auto)" "${DEFAULT_SEQUENCE_POS_MAX}")"
 
   if ! confirm_overwrite "${output_path}"; then
     echo "Cancelled."
@@ -335,20 +297,16 @@ generate_source_dataset() {
     --samples "${samples}"
     --seed "${seed}"
     --path "${output_path}"
-    --mesh-resolution "${mesh_resolution}"
-    --structure-mode "${structure_mode}"
-    --base-radius "${base_radius}"
-    --radial-scale "${radial_scale}"
-    --min-radius "${min_radius}"
-    --max-radius "${max_radius}"
-    --occupancy-mode "${occupancy_mode}"
-    --shell-thickness "${shell_thickness}"
-    --shell-sparsity "${shell_sparsity}"
-    --secondary-motif "${secondary_motif}"
-    --secondary-min-bricks "${secondary_min_bricks}"
-    --secondary-max-bricks "${secondary_max_bricks}"
-    --secondary-nonlocal-min-sep "${secondary_nonlocal_min_sep}"
-    --secondary-dipole-interaction-range "${secondary_dipole_interaction_range}"
+    --scaffold-family "${scaffold_family}"
+    --min-nodes "${min_nodes}"
+    --max-nodes "${max_nodes}"
+    --bifurcation-probability "${bifurcation_probability}"
+    --helix-phase-period "${helix_phase_period}"
+    --tau-straight "${tau_straight}"
+    --tau-planar "${tau_planar}"
+    --tau-junction-degree "${tau_junction_degree}"
+    --shape-noise-scale "${shape_noise_scale}"
+    --dipole-noise-scale "${dipole_noise_scale}"
   )
   if [[ -n "${sequence_pos_max}" ]]; then
     cmd+=(--sequence-pos-max "${sequence_pos_max}")
@@ -651,8 +609,8 @@ print_menu() {
   echo "  6) Visualize LEGO dataset"
   echo "  7) Tail latest training log"
   echo "  8) Show current defaults"
-  echo "  9) Use standard shell preset"
-  echo " 10) Use small-shell overfit preset"
+  echo "  9) Use standard scaffold preset"
+  echo " 10) Use tiny scaffold preset"
   echo "  0) Exit"
 }
 
@@ -670,8 +628,8 @@ main() {
       6) visualize_lego_dataset; pause_menu ;;
       7) tail_training_log; pause_menu ;;
       8) show_defaults; pause_menu ;;
-      9) apply_standard_shell_preset; show_defaults; pause_menu ;;
-      10) apply_small_shell_preset; show_defaults; pause_menu ;;
+      9) apply_standard_scaffold_preset; show_defaults; pause_menu ;;
+      10) apply_tiny_scaffold_preset; show_defaults; pause_menu ;;
       0) exit 0 ;;
       *) echo "Unknown option: ${choice}"; pause_menu ;;
     esac

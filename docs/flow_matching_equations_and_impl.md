@@ -66,8 +66,6 @@ FM equations are identical for all fields. Differences are in:
   - Equivariant direction-like fields:
     - `shape_equiv_features`: unit-norm random blocks (`l=1,2,3` blocks).
     - `dipole_direction`: unit random vectors.
-- Optional projection at sampling:
-  - `project_normalized_states` re-normalizes direction-like states each step.
 - Optional direction/magnitude coupling:
   - `directional_velocity_couplings` rewrites targets/predictions to encode direction in equivariant block and magnitude in scalar channels.
 
