@@ -67,36 +67,6 @@ def _combine_shape_irreps_torch(
     return torch.cat([l0, l1, l2, l3], dim=-1)
 
 
-def _compose_shape_equiv_velocity_from_scalar(
-    shape_scalar_velocity: torch.Tensor,
-    shape_equiv_velocity: torch.Tensor,
-    clamp_nonnegative: bool = True,
-) -> torch.Tensor:
-    if shape_scalar_velocity.shape[-1] < 4 or shape_equiv_velocity.shape[-1] != 15:
-        return shape_equiv_velocity
-    composed = shape_equiv_velocity.clone()
-    block_specs = ((1, 0, 3), (2, 3, 8), (3, 8, 15))
-    for scalar_idx, start, stop in block_specs:
-        scale = shape_scalar_velocity[..., scalar_idx : scalar_idx + 1]
-        if clamp_nonnegative:
-            scale = torch.clamp(scale, min=0.0)
-        composed[..., start:stop] = shape_equiv_velocity[..., start:stop] * scale
-    return composed
-
-
-def _compose_dipole_direction_velocity_from_strength(
-    dipole_strength_velocity: torch.Tensor,
-    dipole_direction_velocity: torch.Tensor,
-    clamp_nonnegative: bool = True,
-) -> torch.Tensor:
-    if dipole_strength_velocity.shape[-1] < 1 or dipole_direction_velocity.shape[-1] != 3:
-        return dipole_direction_velocity
-    scale = dipole_strength_velocity[..., 0:1]
-    if clamp_nonnegative:
-        scale = torch.clamp(scale, min=0.0)
-    return dipole_direction_velocity * scale
-
-
 class DiffusionWeightedCrossEntropyLoss:
     """
     Cross-entropy with per-sample weights derived from diffusion or flow-time
@@ -879,8 +849,6 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         magnitude_floor: float = 0.0,
         include_ligand_ligand: bool = True,
         include_ligand_pocket: bool = True,
-        compose_directional_velocity: bool = False,
-        compose_nonnegative_scale: bool = True,
         label: Optional[str] = None,
         **kwargs,
     ):
@@ -894,8 +862,6 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         self.magnitude_floor = float(magnitude_floor)
         self.include_ligand_ligand = bool(include_ligand_ligand)
         self.include_ligand_pocket = bool(include_ligand_pocket)
-        self.compose_directional_velocity = bool(compose_directional_velocity)
-        self.compose_nonnegative_scale = bool(compose_nonnegative_scale)
         self.label = label
         if self.pair_cutoff <= 0.0:
             raise ValueError("pair_cutoff must be > 0.")
@@ -1045,6 +1011,8 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
     ):
         pos_t = self._resolve_tensor(pred, ref, AtomicDataDict.POSITIONS_KEY)
         velocity = self._resolve_tensor(pred, ref, "velocity")
+        shape_features_t = self._resolve_tensor(pred, ref, "shape_features")
+        shape_features_velocity = self._resolve_tensor(pred, ref, "shape_features_velocity")
         shape_scalar_t = self._resolve_tensor(pred, ref, "shape_scalar_features")
         shape_equiv_t = self._resolve_tensor(pred, ref, "shape_equiv_features")
         shape_scalar_velocity = self._resolve_tensor(pred, ref, "shape_scalar_velocity")
@@ -1057,10 +1025,6 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         required = {
             "pos": pos_t,
             "velocity": velocity,
-            "shape_scalar_features": shape_scalar_t,
-            "shape_equiv_features": shape_equiv_t,
-            "shape_scalar_velocity": shape_scalar_velocity,
-            "shape_equiv_velocity": shape_equiv_velocity,
             "sigma": sigma,
             "batch": batch,
             "ligand_mask": ligand_mask,
@@ -1069,16 +1033,38 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         missing = [name for name, value in required.items() if value is None]
         if len(missing) > 0:
             raise KeyError(f"MaskedShapeAwareClashLoss is missing required fields: {missing}")
+        has_direct_shape = shape_features_t is not None and shape_features_velocity is not None
+        has_split_shape = (
+            shape_scalar_t is not None
+            and shape_equiv_t is not None
+            and shape_scalar_velocity is not None
+            and shape_equiv_velocity is not None
+        )
+        if not (has_direct_shape or has_split_shape):
+            raise KeyError(
+                "MaskedShapeAwareClashLoss requires either "
+                "('shape_features', 'shape_features_velocity') or "
+                "('shape_scalar_features', 'shape_equiv_features', "
+                "'shape_scalar_velocity', 'shape_equiv_velocity')."
+            )
 
         reference = pos_t
         active_mask = self._resolve_mask(pred=pred, ref=ref, reference=reference)
 
         pos_t = pos_t.to(dtype=torch.float32)
         velocity = velocity.to(device=pos_t.device, dtype=pos_t.dtype)
-        shape_scalar_t = shape_scalar_t.to(device=pos_t.device, dtype=pos_t.dtype)
-        shape_equiv_t = shape_equiv_t.to(device=pos_t.device, dtype=pos_t.dtype)
-        shape_scalar_velocity = shape_scalar_velocity.to(device=pos_t.device, dtype=pos_t.dtype)
-        shape_equiv_velocity = shape_equiv_velocity.to(device=pos_t.device, dtype=pos_t.dtype)
+        if shape_features_t is not None:
+            shape_features_t = shape_features_t.to(device=pos_t.device, dtype=pos_t.dtype)
+        if shape_features_velocity is not None:
+            shape_features_velocity = shape_features_velocity.to(device=pos_t.device, dtype=pos_t.dtype)
+        if shape_scalar_t is not None:
+            shape_scalar_t = shape_scalar_t.to(device=pos_t.device, dtype=pos_t.dtype)
+        if shape_equiv_t is not None:
+            shape_equiv_t = shape_equiv_t.to(device=pos_t.device, dtype=pos_t.dtype)
+        if shape_scalar_velocity is not None:
+            shape_scalar_velocity = shape_scalar_velocity.to(device=pos_t.device, dtype=pos_t.dtype)
+        if shape_equiv_velocity is not None:
+            shape_equiv_velocity = shape_equiv_velocity.to(device=pos_t.device, dtype=pos_t.dtype)
         batch = batch.to(device=pos_t.device, dtype=torch.long)
         if batch.dim() > 1 and batch.shape[-1] == 1:
             batch = batch.squeeze(-1)
@@ -1092,21 +1078,17 @@ class MaskedShapeAwareClashLoss(MaskedLossWrapper):
         sigma = sigma.to(device=pos_t.device, dtype=pos_t.dtype)
         sigma = self._expand_graph_tensor(sigma, batch=batch, target_dim=1).to(dtype=pos_t.dtype).reshape(-1, 1)
 
-        if self.compose_directional_velocity:
-            shape_equiv_velocity = _compose_shape_equiv_velocity_from_scalar(
-                shape_scalar_velocity,
-                shape_equiv_velocity,
-                clamp_nonnegative=self.compose_nonnegative_scale,
-            )
-
         pred_pos_0 = pos_t - sigma * velocity
-        pred_shape_scalar = shape_scalar_t - sigma * shape_scalar_velocity
-        pred_shape_equiv = shape_equiv_t - sigma * shape_equiv_velocity
-        pred_shape_coeffs = _combine_shape_irreps_torch(
-            pred_shape_scalar,
-            pred_shape_equiv,
-            magnitude_floor=self.magnitude_floor,
-        )
+        if has_direct_shape:
+            pred_shape_coeffs = shape_features_t - sigma * shape_features_velocity
+        else:
+            pred_shape_scalar = shape_scalar_t - sigma * shape_scalar_velocity
+            pred_shape_equiv = shape_equiv_t - sigma * shape_equiv_velocity
+            pred_shape_coeffs = _combine_shape_irreps_torch(
+                pred_shape_scalar,
+                pred_shape_equiv,
+                magnitude_floor=self.magnitude_floor,
+            )
 
         penalties = []
         num_graphs = int(batch.max().item()) + 1 if batch.numel() > 0 else 0
@@ -1150,8 +1132,6 @@ class MaskedBrickLibraryMetric(MaskedLossWrapper):
         self,
         metric: str = "distance",
         type_names: Optional[Sequence[str]] = None,
-        compose_directional_velocity: bool = False,
-        compose_nonnegative_scale: bool = True,
         label: Optional[str] = None,
         **kwargs,
     ):
@@ -1160,8 +1140,6 @@ class MaskedBrickLibraryMetric(MaskedLossWrapper):
             raise ValueError("metric must be one of: 'distance', 'type_accuracy'.")
         self.metric = str(metric)
         self.type_names = None if type_names is None else [str(name) for name in type_names]
-        self.compose_directional_velocity = bool(compose_directional_velocity)
-        self.compose_nonnegative_scale = bool(compose_nonnegative_scale)
         self.label = label
         self._warned_missing_decode_inputs = False
 
@@ -1201,31 +1179,45 @@ class MaskedBrickLibraryMetric(MaskedLossWrapper):
         if combine_shape_irreps is None or decode_brick_signatures is None:
             raise ImportError("LEGO decode helpers are unavailable for MaskedBrickLibraryMetric.")
 
-        reference = self._resolve_tensor(pred, ref, "shape_equiv_velocity")
+        reference = self._resolve_tensor(pred, ref, "shape_features_velocity")
         if reference is None:
-            raise KeyError("MaskedBrickLibraryMetric expected field 'shape_equiv_velocity' in prediction or reference dict.")
+            reference = self._resolve_tensor(pred, ref, "shape_equiv_velocity")
+        if reference is None:
+            raise KeyError(
+                "MaskedBrickLibraryMetric expected field "
+                "'shape_features_velocity' (or legacy 'shape_equiv_velocity') "
+                "in prediction or reference dict."
+            )
         mask = self._resolve_mask(pred=pred, ref=ref, reference=reference)
         batch = self._resolve_tensor(pred, ref, AtomicDataDict.BATCH_KEY)
         sigma = self._resolve_tensor(pred, ref, _DEFAULT_DIFFUSION_SIGMA_KEY)
+        shape_features_t = self._resolve_tensor(pred, ref, "shape_features")
+        shape_features_velocity = self._resolve_tensor(pred, ref, "shape_features_velocity")
         shape_scalar_t = self._resolve_tensor(pred, ref, "shape_scalar_features")
         shape_equiv_t = self._resolve_tensor(pred, ref, "shape_equiv_features")
         shape_scalar_velocity = self._resolve_tensor(pred, ref, "shape_scalar_velocity")
         shape_equiv_velocity = self._resolve_tensor(pred, ref, "shape_equiv_velocity")
         node_types_true = self._resolve_tensor(pred, ref, "node_types_true")
-        shape_scalar_norm_means = self._resolve_tensor(pred, ref, "shape_scalar_norm_means")
-        shape_scalar_norm_stds = self._resolve_tensor(pred, ref, "shape_scalar_norm_stds")
+        has_direct_shape = shape_features_t is not None and shape_features_velocity is not None
+        has_split_shape = (
+            shape_scalar_t is not None
+            and shape_equiv_t is not None
+            and shape_scalar_velocity is not None
+            and shape_equiv_velocity is not None
+        )
 
         required = {
             "batch": batch,
             "sigma": sigma,
-            "shape_scalar_features": shape_scalar_t,
-            "shape_equiv_features": shape_equiv_t,
-            "shape_scalar_velocity": shape_scalar_velocity,
-            "shape_equiv_velocity": shape_equiv_velocity,
             "node_types_true": node_types_true,
-            "shape_scalar_norm_means": shape_scalar_norm_means,
-            "shape_scalar_norm_stds": shape_scalar_norm_stds,
         }
+        if not (has_direct_shape or has_split_shape):
+            required["shape_features"] = shape_features_t
+            required["shape_features_velocity"] = shape_features_velocity
+            required["shape_scalar_features"] = shape_scalar_t
+            required["shape_equiv_features"] = shape_equiv_t
+            required["shape_scalar_velocity"] = shape_scalar_velocity
+            required["shape_equiv_velocity"] = shape_equiv_velocity
         missing = [name for name, value in required.items() if value is None]
         if len(missing) > 0:
             if not self._warned_missing_decode_inputs:
@@ -1240,68 +1232,76 @@ class MaskedBrickLibraryMetric(MaskedLossWrapper):
 
         batch = batch.to(device=reference.device, dtype=torch.long)
         sigma = sigma.to(device=reference.device, dtype=reference.dtype)
-        shape_scalar_t = shape_scalar_t.to(device=reference.device, dtype=reference.dtype)
-        shape_equiv_t = shape_equiv_t.to(device=reference.device, dtype=reference.dtype)
-        shape_scalar_velocity = shape_scalar_velocity.to(device=reference.device, dtype=reference.dtype)
-        shape_equiv_velocity = shape_equiv_velocity.to(device=reference.device, dtype=reference.dtype)
+        if shape_features_t is not None:
+            shape_features_t = shape_features_t.to(device=reference.device, dtype=reference.dtype)
+        if shape_features_velocity is not None:
+            shape_features_velocity = shape_features_velocity.to(device=reference.device, dtype=reference.dtype)
+        if shape_scalar_t is not None:
+            shape_scalar_t = shape_scalar_t.to(device=reference.device, dtype=reference.dtype)
+        if shape_equiv_t is not None:
+            shape_equiv_t = shape_equiv_t.to(device=reference.device, dtype=reference.dtype)
+        if shape_scalar_velocity is not None:
+            shape_scalar_velocity = shape_scalar_velocity.to(device=reference.device, dtype=reference.dtype)
+        if shape_equiv_velocity is not None:
+            shape_equiv_velocity = shape_equiv_velocity.to(device=reference.device, dtype=reference.dtype)
         node_types_true = node_types_true.to(device=reference.device, dtype=torch.long)
-        shape_scalar_norm_means = shape_scalar_norm_means.to(device=reference.device, dtype=reference.dtype)
-        shape_scalar_norm_stds = shape_scalar_norm_stds.to(device=reference.device, dtype=reference.dtype)
-
-        shape_scalar_t, shape_equiv_t, mask = self._apply_node_filter_and_mask(
-            pred_key=shape_scalar_t,
-            ref_key=shape_equiv_t,
-            mask=mask,
-            data=pred,
-            key=key,
-        )
-        shape_scalar_velocity = self._apply_node_filter_to_tensor(shape_scalar_velocity, data=pred, key=key)
-        shape_equiv_velocity = self._apply_node_filter_to_tensor(shape_equiv_velocity, data=pred, key=key)
+        if has_direct_shape:
+            shape_features_t = self._apply_node_filter_to_tensor(shape_features_t, data=pred, key=key)
+            shape_features_velocity = self._apply_node_filter_to_tensor(shape_features_velocity, data=pred, key=key)
+        else:
+            shape_scalar_t, shape_equiv_t, mask = self._apply_node_filter_and_mask(
+                pred_key=shape_scalar_t,
+                ref_key=shape_equiv_t,
+                mask=mask,
+                data=pred,
+                key=key,
+            )
+            shape_scalar_velocity = self._apply_node_filter_to_tensor(shape_scalar_velocity, data=pred, key=key)
+            shape_equiv_velocity = self._apply_node_filter_to_tensor(shape_equiv_velocity, data=pred, key=key)
         node_types_true = self._apply_node_filter_to_tensor(node_types_true, data=pred, key=key)
         batch = self._apply_node_filter_to_tensor(batch, data=pred, key=key)
 
         sigma = self._expand_graph_tensor(sigma, batch=batch, target_dim=1).to(dtype=reference.dtype)
-        shape_scalar_norm_means = self._expand_graph_tensor(shape_scalar_norm_means, batch=batch, target_dim=4).to(dtype=reference.dtype)
-        shape_scalar_norm_stds = self._expand_graph_tensor(shape_scalar_norm_stds, batch=batch, target_dim=4).to(dtype=reference.dtype)
 
-        if shape_scalar_velocity.shape[0] == mask.shape[0]:
-            shape_scalar_velocity = shape_scalar_velocity[mask]
-        if shape_equiv_velocity.shape[0] == mask.shape[0]:
-            shape_equiv_velocity = shape_equiv_velocity[mask]
+        if has_direct_shape:
+            if shape_features_t.shape[0] == mask.shape[0]:
+                shape_features_t = shape_features_t[mask]
+            if shape_features_velocity.shape[0] == mask.shape[0]:
+                shape_features_velocity = shape_features_velocity[mask]
+        else:
+            if shape_scalar_velocity.shape[0] == mask.shape[0]:
+                shape_scalar_velocity = shape_scalar_velocity[mask]
+            if shape_equiv_velocity.shape[0] == mask.shape[0]:
+                shape_equiv_velocity = shape_equiv_velocity[mask]
         if node_types_true.shape[0] == mask.shape[0]:
             node_types_true = node_types_true[mask]
         if sigma.shape[0] == mask.shape[0]:
             sigma = sigma[mask]
-        if shape_scalar_norm_means.shape[0] == mask.shape[0]:
-            shape_scalar_norm_means = shape_scalar_norm_means[mask]
-        if shape_scalar_norm_stds.shape[0] == mask.shape[0]:
-            shape_scalar_norm_stds = shape_scalar_norm_stds[mask]
-        if shape_scalar_t.shape[0] == mask.shape[0]:
-            shape_scalar_t = shape_scalar_t[mask]
-        if shape_equiv_t.shape[0] == mask.shape[0]:
-            shape_equiv_t = shape_equiv_t[mask]
+        if not has_direct_shape:
+            if shape_scalar_t.shape[0] == mask.shape[0]:
+                shape_scalar_t = shape_scalar_t[mask]
+            if shape_equiv_t.shape[0] == mask.shape[0]:
+                shape_equiv_t = shape_equiv_t[mask]
 
-        if shape_scalar_t.numel() == 0:
+        if has_direct_shape:
+            empty = shape_features_t.numel() == 0
+        else:
+            empty = shape_scalar_t.numel() == 0
+        if empty:
             if mean:
                 return torch.zeros((), device=reference.device, dtype=reference.dtype)
             return reference.new_empty((0,), dtype=reference.dtype)
 
-        if self.compose_directional_velocity:
-            shape_equiv_velocity = _compose_shape_equiv_velocity_from_scalar(
-                shape_scalar_velocity,
-                shape_equiv_velocity,
-                clamp_nonnegative=self.compose_nonnegative_scale,
-            )
-
         sigma = sigma.reshape(-1, 1)
-        pred_shape_scalar_norm = shape_scalar_t - sigma * shape_scalar_velocity
-        pred_shape_equiv = shape_equiv_t - sigma * shape_equiv_velocity
-        pred_shape_scalar_raw = shape_scalar_norm_means + shape_scalar_norm_stds * pred_shape_scalar_norm
-
-        pred_shape = combine_shape_irreps(
-            pred_shape_scalar_raw.detach().cpu().numpy().astype(np.float32),
-            pred_shape_equiv.detach().cpu().numpy().astype(np.float32),
-        )
+        if has_direct_shape:
+            pred_shape = (shape_features_t - sigma * shape_features_velocity).detach().cpu().numpy().astype(np.float32)
+        else:
+            pred_shape_scalar_norm = shape_scalar_t - sigma * shape_scalar_velocity
+            pred_shape_equiv = shape_equiv_t - sigma * shape_equiv_velocity
+            pred_shape = combine_shape_irreps(
+                pred_shape_scalar_norm.detach().cpu().numpy().astype(np.float32),
+                pred_shape_equiv.detach().cpu().numpy().astype(np.float32),
+            )
         decoded = decode_brick_signatures(pred_shape)
 
         if self.metric == "distance":

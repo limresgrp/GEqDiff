@@ -36,6 +36,9 @@ POSITIVE_COLOR = np.asarray((74, 118, 212), dtype=np.float32)
 DEFAULT_DIPOLE_LENGTH = 0.9
 MIN_DIPOLE_LENGTH = 0.2
 MAX_DIPOLE_LENGTH = 2.2
+DEFAULT_VELOCITY_LENGTH = 0.9
+MIN_VELOCITY_LENGTH = 0.1
+MAX_VELOCITY_LENGTH = 3.0
 DEFAULT_BLOCK_OPACITY = 1.0
 MIN_BLOCK_OPACITY = 0.15
 MAX_BLOCK_OPACITY = 1.0
@@ -47,6 +50,8 @@ SAMPLED_STRUCTURE_FIELDS = (
     "brick_dipoles",
     "brick_dipole_strengths",
     "brick_dipole_directions",
+    "velocity_vectors",
+    "velocity_raw_vectors",
 )
 
 
@@ -361,6 +366,51 @@ def _dipole_specs(sample: Dict, anchors: np.ndarray, types: np.ndarray, rotation
     return specs
 
 
+def _velocity_specs(sample: Dict, anchors: np.ndarray, types: np.ndarray, rotations: np.ndarray) -> List[Dict]:
+    guided_vectors = np.asarray(sample.get("velocity_vectors", np.zeros((len(anchors), 3), dtype=np.float32)), dtype=np.float32)
+    raw_vectors = np.asarray(sample.get("velocity_raw_vectors", np.zeros((len(anchors), 3), dtype=np.float32)), dtype=np.float32)
+    if guided_vectors.shape != (len(anchors), 3):
+        guided_vectors = np.zeros((len(anchors), 3), dtype=np.float32)
+    if raw_vectors.shape != (len(anchors), 3):
+        raw_vectors = np.zeros((len(anchors), 3), dtype=np.float32)
+    mask = np.asarray(sample.get("sampled_brick_mask", np.zeros((len(anchors),), dtype=bool)), dtype=bool).reshape(-1)
+    if mask.size == 0:
+        mask = np.zeros((len(anchors),), dtype=bool)
+
+    specs: List[Dict] = []
+    for vectors, group_name, color in (
+        (raw_vectors, "Predicted step", "#5a63d8"),
+        (guided_vectors, "Guided step", "#d66a18"),
+    ):
+        centers: List[List[float]] = []
+        directions: List[List[float]] = []
+        strengths: List[float] = []
+        for brick_index in range(len(anchors)):
+            if not bool(mask[brick_index]):
+                continue
+            velocity = np.asarray(vectors[brick_index], dtype=np.float32)
+            strength = float(np.linalg.norm(velocity))
+            if strength <= 1e-10:
+                continue
+            brick_center = _brick_center(anchors[brick_index], str(types[brick_index]), rotations[brick_index])
+            direction = velocity / strength
+            centers.append(brick_center.astype(float).tolist())
+            directions.append(direction.astype(float).tolist())
+            strengths.append(strength)
+        if len(centers) == 0:
+            continue
+        specs.append(
+            {
+                "name": group_name,
+                "color": color,
+                "centers": centers,
+                "directions": directions,
+                "strengths": strengths,
+            }
+        )
+    return specs
+
+
 def _dipole_traces_from_specs(specs: Sequence[Dict], length_scale: float) -> List[go.BaseTraceType]:
     traces: List[go.BaseTraceType] = []
     for spec in specs:
@@ -549,6 +599,7 @@ def _structure_traces(sample: Dict, prefix: str) -> Dict[str, List[go.BaseTraceT
         "bricks": bricks,
         "surfaces": surfaces,
         "dipole_specs": _dipole_specs(sample, anchors=anchors, types=types, rotations=rotations, dipoles=dipoles),
+        "velocity_specs": _velocity_specs(sample, anchors=anchors, types=types, rotations=rotations),
     }
 
 
@@ -672,10 +723,6 @@ def _sample_meta(sample: Dict) -> Dict[str, int | bool | float | str]:
         meta["sampling_clash_guidance_weight_schedule"] = str(np.asarray(sample["sampling_clash_guidance_weight_schedule"]).reshape(-1)[0])
     if "sampling_clash_guidance_auto_scale" in sample:
         meta["sampling_clash_guidance_auto_scale"] = bool(np.asarray(sample["sampling_clash_guidance_auto_scale"]).reshape(-1)[0])
-    if "sampling_cohesion_guidance_strength" in sample:
-        meta["sampling_cohesion_guidance_strength"] = float(np.asarray(sample["sampling_cohesion_guidance_strength"]).reshape(-1)[0])
-    if "sampling_cohesion_guidance_target_contacts" in sample:
-        meta["sampling_cohesion_guidance_target_contacts"] = float(np.asarray(sample["sampling_cohesion_guidance_target_contacts"]).reshape(-1)[0])
     if "intermediate_states" in sample:
         meta["num_intermediate_states"] = int(len(sample["intermediate_states"]))
     if "trajectory_stride" in sample:
@@ -722,6 +769,7 @@ def _trajectory_state_payloads(sample: Dict) -> List[Dict]:
                     "bricks": _serialize_traces(stage_traces["bricks"]),
                     "surfaces": _serialize_traces(stage_traces["surfaces"]),
                     "dipole_specs": stage_traces["dipole_specs"],
+                    "velocity_specs": stage_traces["velocity_specs"],
                 },
                 "scores": evaluate_sample_scores(stage_sample),
             }
@@ -749,6 +797,7 @@ def _sample_state(sample: Dict, projection: str) -> Dict:
                 "bricks": _serialize_traces(original["bricks"]),
                 "surfaces": _serialize_traces(original["surfaces"]),
                 "dipole_specs": original["dipole_specs"],
+                "velocity_specs": original["velocity_specs"],
             },
         },
         "target": {key: _serialize_traces(value) for key, value in target.items()},
@@ -1157,10 +1206,19 @@ def _build_html(
         <input id="dipole-toggle" type="checkbox"{dipole_checked}>
         <label for="dipole-toggle">Show dipole axes</label>
       </div>
+      <div class="control checkbox">
+        <input id="velocity-toggle" type="checkbox">
+        <label for="velocity-toggle">Show velocity vectors</label>
+      </div>
       <div class="control">
         <label for="dipole-length">Dipole length</label>
         <input id="dipole-length" type="range" min="{MIN_DIPOLE_LENGTH}" max="{MAX_DIPOLE_LENGTH}" step="0.05" value="{DEFAULT_DIPOLE_LENGTH}">
         <div id="dipole-length-value" class="slider-value">{DEFAULT_DIPOLE_LENGTH:.2f}</div>
+      </div>
+      <div class="control">
+        <label for="velocity-length">Velocity length</label>
+        <input id="velocity-length" type="range" min="{MIN_VELOCITY_LENGTH}" max="{MAX_VELOCITY_LENGTH}" step="0.05" value="{DEFAULT_VELOCITY_LENGTH}">
+        <div id="velocity-length-value" class="slider-value">{DEFAULT_VELOCITY_LENGTH:.2f}</div>
       </div>
       <div class="control">
         <label for="block-opacity">Block opacity</label>
@@ -1204,8 +1262,11 @@ def _build_html(
     const targetSelect = document.getElementById("target-select");
     const projectionSelect = document.getElementById("projection-select");
     const dipoleToggle = document.getElementById("dipole-toggle");
+    const velocityToggle = document.getElementById("velocity-toggle");
     const dipoleLength = document.getElementById("dipole-length");
     const dipoleLengthValue = document.getElementById("dipole-length-value");
+    const velocityLength = document.getElementById("velocity-length");
+    const velocityLengthValue = document.getElementById("velocity-length-value");
     const blockOpacity = document.getElementById("block-opacity");
     const blockOpacityValue = document.getElementById("block-opacity-value");
     const syncLeftToRight = document.getElementById("sync-left-to-right");
@@ -1377,15 +1438,6 @@ def _build_html(
             }}
             if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_clash_guidance_auto_scale")) {{
               guidanceText += state.meta.sampling_clash_guidance_auto_scale ? ", auto-scale" : ", fixed-scale";
-            }}
-            if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_cohesion_guidance_strength")) {{
-              const cgs = Number(state.meta.sampling_cohesion_guidance_strength);
-              if (cgs > 0) {{
-                guidanceText += `, cohesion=${{cgs.toFixed(2)}}`;
-                if (Object.prototype.hasOwnProperty.call(state.meta, "sampling_cohesion_guidance_target_contacts")) {{
-                  guidanceText += `@${{Number(state.meta.sampling_cohesion_guidance_target_contacts).toFixed(1)}}`;
-                }}
-              }}
             }}
             bits.push(guidanceText);
           }} else {{
@@ -1583,12 +1635,14 @@ def _build_html(
             ], metrics)}}
             <div class="score-section-title">Dipoles</div>
             ${{renderMetricRows([
-              ["Attractive contact area", "attractive_contact_area", 3],
-              ["Repulsive contact area", "repulsive_contact_area", 3],
-              ["Neutral contact area", "neutral_contact_area", 3],
-              ["Total contact area", "total_contact_area", 3],
-              ["Weighted dipole energy", "weighted_dipole_energy", 3],
-              ["Mean weighted energy", "mean_weighted_dipole_energy", 3],
+              ["Attractive contacts", "attractive_contact_count", 0],
+              ["Repulsive contacts", "repulsive_contact_count", 0],
+              ["Neutral contacts", "neutral_contact_count", 0],
+              ["Total face contacts", "total_contact_count", 0],
+              ["Dipole total energy", "dipole_total_energy", 3],
+              ["Dipole contact energy", "dipole_contact_energy", 3],
+              ["Dipole polar cost", "dipole_polar_cost", 3],
+              ["Mean dipole energy/face", "mean_dipole_energy_per_face", 3],
             ], metrics)}}
             ${{targetSection}}
           </div>
@@ -1830,6 +1884,82 @@ def _build_html(
       return traces;
     }}
 
+    function buildVelocityTraces(specs) {{
+      const lengthScale = Number(velocityLength.value);
+      const coneRef = Math.max(0.08, 0.45 * Math.max(0.08, 0.24 * lengthScale));
+      const traces = [];
+      specs.forEach((spec, specIndex) => {{
+        const lineX = [];
+        const lineY = [];
+        const lineZ = [];
+        const coneX = [];
+        const coneY = [];
+        const coneZ = [];
+        const coneU = [];
+        const coneV = [];
+        const coneW = [];
+        spec.centers.forEach((center, idx) => {{
+          const direction = spec.directions[idx];
+          const strength = Number(spec.strengths[idx]);
+          const arrowLength = Math.max(0.0, lengthScale * strength);
+          if (arrowLength <= 1e-8) {{
+            return;
+          }}
+          const coneLength = Math.min(Math.max(0.08, 0.24 * lengthScale), 0.60 * arrowLength);
+          const tip = center.map((value, axis) => value + 0.5 * arrowLength * direction[axis]);
+          const start = center.map((value, axis) => value - 0.5 * arrowLength * direction[axis]);
+          const shaftEnd = tip.map((value, axis) => value - coneLength * direction[axis]);
+          lineX.push(start[0], shaftEnd[0], null);
+          lineY.push(start[1], shaftEnd[1], null);
+          lineZ.push(start[2], shaftEnd[2], null);
+          coneX.push(tip[0]);
+          coneY.push(tip[1]);
+          coneZ.push(tip[2]);
+          coneU.push(coneLength * direction[0]);
+          coneV.push(coneLength * direction[1]);
+          coneW.push(coneLength * direction[2]);
+        }});
+        if (coneX.length === 0) {{
+          return;
+        }}
+        traces.push({{
+          type: "scatter3d",
+          x: lineX,
+          y: lineY,
+          z: lineZ,
+          scene: "scene",
+          mode: "lines",
+          line: {{ width: 5, color: spec.color }},
+          name: spec.name,
+          showlegend: false,
+          hoverinfo: "skip",
+          uid: `velocity-line-${{specIndex}}`
+        }});
+        traces.push({{
+          type: "cone",
+          x: coneX,
+          y: coneY,
+          z: coneZ,
+          u: coneU,
+          v: coneV,
+          w: coneW,
+          scene: "scene",
+          anchor: "tip",
+          showscale: false,
+          showlegend: false,
+          hoverinfo: "skip",
+          colorscale: [[0.0, spec.color], [1.0, spec.color]],
+          cmin: 0.0,
+          cmax: 1.0,
+          sizemode: "absolute",
+          sizeref: coneRef,
+          name: spec.name,
+          uid: `velocity-cone-${{specIndex}}`
+        }});
+      }});
+      return traces;
+    }}
+
     function currentTracesForStructure(state, structureKey) {{
       const display = displaySelect.value;
       const targetMode = normalizeTargetMode(targetSelect.value);
@@ -1837,6 +1967,9 @@ def _build_html(
       traces = traces.concat(structureTracesForPlot(state, structureKey, display, true));
       if (dipoleToggle.checked) {{
         traces = traces.concat(buildDipoleTraces(structurePayloadForKey(state, structureKey).dipole_specs));
+      }}
+      if (velocityToggle.checked) {{
+        traces = traces.concat(buildVelocityTraces(structurePayloadForKey(state, structureKey).velocity_specs || []));
       }}
       traces = traces.concat(targetTracesForPlot(state, targetMode, true));
       return traces;
@@ -1936,6 +2069,7 @@ def _build_html(
       Plotly.react(plotRightEl, rightTraces, rightLayout, {{ responsive: true, displaylogo: false }});
       lastRenderedSampleIndex = sampleIndex;
       dipoleLengthValue.textContent = Number(dipoleLength.value).toFixed(2);
+      velocityLengthValue.textContent = Number(velocityLength.value).toFixed(2);
       blockOpacityValue.textContent = Number(blockOpacity.value).toFixed(2);
       buildMeta(state, sampleIndex);
       buildScorePanel(state);
@@ -1982,11 +2116,12 @@ def _build_html(
       return false;
     }});
 
-    [sampleSelect, displaySelect, targetSelect, projectionSelect, dipoleToggle].forEach((element) => {{
+    [sampleSelect, displaySelect, targetSelect, projectionSelect, dipoleToggle, velocityToggle].forEach((element) => {{
       element.addEventListener("change", render);
     }});
     trajectorySlider.addEventListener("input", render);
     dipoleLength.addEventListener("input", render);
+    velocityLength.addEventListener("input", render);
     blockOpacity.addEventListener("input", render);
     syncLeftToRight.addEventListener("click", () => syncCamera(plotLeftEl, plotRightEl));
     syncRightToLeft.addEventListener("click", () => syncCamera(plotRightEl, plotLeftEl));

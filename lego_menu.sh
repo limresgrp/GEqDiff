@@ -448,7 +448,7 @@ train_lego_model() {
 }
 
 sample_lego_blocks() {
-  local latest_model model_path input_path output_path source_path metrics_json num_samples steps sampler_name start_step late_refine_from_step late_refine_factor linger_step linger_count clash_guidance clash_guidance_strength clash_guidance_max_norm clash_guidance_weight_schedule clash_guidance_auto_scale clash_guidance_auto_scale_min clash_guidance_auto_scale_max cohesion_guidance_strength cohesion_guidance_target_contacts save_metrics device seed indices_raw save_intermediates use_refinement use_linger use_guidance use_cohesion use_partial_start
+  local latest_model model_path input_path output_path source_path metrics_json num_samples steps sampler_name start_step late_refine_from_step late_refine_factor linger_step linger_count clash_guidance clash_guidance_strength clash_guidance_max_norm clash_guidance_weight_schedule clash_guidance_auto_scale clash_guidance_auto_scale_min clash_guidance_auto_scale_max save_metrics device seed indices_raw save_intermediates save_velocity_vectors use_refinement use_linger use_partial_start
   latest_model="$(latest_named_file "${RESULTS_ROOT_PATH}" "best_model.pth")"
   model_path="$(prompt_with_default "Checkpoint path" "${latest_model}")"
   input_path="$(prompt_with_default "Input diffusion dataset path" "${DIFFUSION_DATASET_PATH}")"
@@ -487,7 +487,6 @@ sample_lego_blocks() {
   fi
 
   if prompt_yes_no "Enable clash guidance?" "n"; then
-    use_guidance="y"
     clash_guidance="y"
     clash_guidance_strength="$(prompt_with_default "Clash guidance strength" "0.05")"
     clash_guidance_max_norm="$(prompt_with_default "Clash guidance max norm" "1.0")"
@@ -502,7 +501,6 @@ sample_lego_blocks() {
       clash_guidance_auto_scale_max="5.0"
     fi
   else
-    use_guidance="n"
     clash_guidance="n"
     clash_guidance_strength="0.05"
     clash_guidance_max_norm="1.0"
@@ -512,21 +510,6 @@ sample_lego_blocks() {
     clash_guidance_auto_scale_max="5.0"
   fi
 
-  if prompt_yes_no "Enable cohesion guidance term?" "n"; then
-    use_cohesion="y"
-    cohesion_guidance_strength="$(prompt_with_default "Cohesion guidance strength" "0.02")"
-    cohesion_guidance_target_contacts="$(prompt_with_default "Cohesion target contacts" "1.5")"
-  else
-    use_cohesion="n"
-    cohesion_guidance_strength="0.0"
-    cohesion_guidance_target_contacts="1.5"
-  fi
-  if [[ "${use_guidance}" != "y" ]]; then
-    use_cohesion="n"
-    cohesion_guidance_strength="0.0"
-    cohesion_guidance_target_contacts="1.5"
-  fi
-
   device="$(prompt_with_default "Device" "cuda:0")"
   seed="$(prompt_with_default "Random seed" "0")"
   indices_raw="$(prompt_with_default "Explicit diffusion example indices (space-separated, blank for random)" "")"
@@ -534,6 +517,15 @@ sample_lego_blocks() {
     save_intermediates="y"
   else
     save_intermediates="n"
+  fi
+  if [[ "${save_intermediates}" == "y" ]]; then
+    if prompt_yes_no "Save velocity displacement vectors in intermediates?" "n"; then
+      save_velocity_vectors="y"
+    else
+      save_velocity_vectors="n"
+    fi
+  else
+    save_velocity_vectors="n"
   fi
   if prompt_yes_no "Save evaluation metrics JSON?" "y"; then
     save_metrics="y"
@@ -577,9 +569,6 @@ sample_lego_blocks() {
   else
     cmd+=(--no-clash-guidance-auto-scale)
   fi
-  if [[ "${use_cohesion}" == "y" ]]; then
-    cmd+=(--cohesion-guidance-strength "${cohesion_guidance_strength}" --cohesion-guidance-target-contacts "${cohesion_guidance_target_contacts}")
-  fi
   if [[ -n "${source_path}" ]]; then
     cmd+=(--source-canonical "${source_path}")
   fi
@@ -590,6 +579,11 @@ sample_lego_blocks() {
   fi
   if [[ "${save_intermediates}" == "y" ]]; then
     cmd+=(--save-intermediates)
+    if [[ "${save_velocity_vectors}" == "y" ]]; then
+      cmd+=(--save-velocity-vectors)
+    else
+      cmd+=(--no-save-velocity-vectors)
+    fi
   fi
   if [[ "${save_metrics}" == "y" ]]; then
     cmd+=(--save-metrics)

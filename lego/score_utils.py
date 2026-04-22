@@ -10,8 +10,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from geqdiff.utils.contact_utils import build_brick_geometries
-from geqdiff.utils.dipole_utils import DipoleAssignmentConfig
+from geqdiff.utils.contact_utils import build_brick_geometries, detect_brick_contacts
+from geqdiff.utils.dipole_utils import DipoleAssignmentConfig, evaluate_contact_energy
 
 
 FACE_MATCH_TOLERANCE = 0.35
@@ -35,18 +35,6 @@ def structure_from_sample(sample: Dict[str, Any], prefix: str = "") -> Dict[str,
             dtype=np.float32,
         ),
     }
-
-
-def _pair_energy_from_projections(q_i: float, q_j: float, config: DipoleAssignmentConfig) -> float:
-    coupling = float(q_i * q_j)
-    energy = 0.0
-    if coupling > 0.0:
-        energy += float(config.repulsion_penalty) * coupling
-    elif coupling < 0.0:
-        energy += float(config.attraction_reward) * (-coupling)
-    occupancy = abs(float(q_i)) * abs(float(q_j))
-    energy += float(config.neutral_contact_penalty) * (1.0 - occupancy)
-    return float(energy)
 
 
 def _continuous_face_match(delta: np.ndarray, overlap_volume: float, tolerance: float = FACE_MATCH_TOLERANCE) -> tuple[float, np.ndarray | None]:
@@ -159,20 +147,14 @@ def evaluate_structure_scores(
     pair_overlaps: List[float] = []
     matched_face_area = 0.0
     connected_pair_count = 0
-    attractive_contact_area = 0.0
-    repulsive_contact_area = 0.0
-    neutral_contact_area = 0.0
-    weighted_dipole_energy = 0.0
     component_edges: List[Tuple[int, int]] = []
 
     dipoles = np.asarray(structure.get("brick_dipoles", np.zeros((num_bricks, 3), dtype=np.float32)), dtype=np.float32)
 
     for src_index in range(num_bricks):
         voxels_src = np.asarray(geometries[src_index]["world_voxels"], dtype=np.float32).reshape(-1, 3)
-        dipole_src = dipoles[src_index] if src_index < dipoles.shape[0] else np.zeros((3,), dtype=np.float32)
         for dst_index in range(src_index + 1, num_bricks):
             voxels_dst = np.asarray(geometries[dst_index]["world_voxels"], dtype=np.float32).reshape(-1, 3)
-            dipole_dst = dipoles[dst_index] if dst_index < dipoles.shape[0] else np.zeros((3,), dtype=np.float32)
 
             pair_overlap = 0.0
             pair_contact_area = 0.0
@@ -190,22 +172,6 @@ def evaluate_structure_scores(
                         continue
 
                     pair_contact_area += float(contact_area)
-                    q_src = float(np.dot(dipole_src, direction))
-                    q_dst = float(np.dot(dipole_dst, -direction))
-                    coupling = float(q_src * q_dst)
-                    if abs(q_src) <= EPS or abs(q_dst) <= EPS:
-                        neutral_contact_area += float(contact_area)
-                    elif coupling > 0.0:
-                        repulsive_contact_area += float(contact_area)
-                    elif coupling < 0.0:
-                        attractive_contact_area += float(contact_area)
-                    else:
-                        neutral_contact_area += float(contact_area)
-                    weighted_dipole_energy += float(contact_area) * _pair_energy_from_projections(
-                        q_src,
-                        q_dst,
-                        config=dipole_config,
-                    )
 
             total_overlap_volume += pair_overlap
             pair_overlaps.append(float(pair_overlap))
@@ -227,7 +193,33 @@ def evaluate_structure_scores(
     matched_face_ratio = float(
         np.clip((2.0 * matched_face_area) / max(float(intrinsic_face_count), 1.0), 0.0, 1.0)
     )
-    total_contact_area = attractive_contact_area + repulsive_contact_area + neutral_contact_area
+
+    dipole_eval_error = ""
+    try:
+        contacts = detect_brick_contacts(geometries)
+        energy_eval = evaluate_contact_energy(
+            dipoles=dipoles,
+            all_face_contact_pairs=np.asarray(contacts["all_face_contact_pairs"], dtype=np.int64),
+            all_face_contact_dirs=np.asarray(contacts["all_face_contact_dirs"], dtype=np.float32),
+            config=dipole_config,
+        )
+    except Exception as exc:
+        dipole_eval_error = f"{type(exc).__name__}: {exc}"
+        energy_eval = {
+            "total_energy": 0.0,
+            "polar_cost": 0.0,
+            "contact_energy": 0.0,
+            "num_face_contacts": 0,
+            "num_attractive_contacts": 0,
+            "num_repulsive_contacts": 0,
+            "num_neutral_contacts": 0,
+            "mean_energy_per_face": 0.0,
+        }
+
+    attractive_contact_count = int(energy_eval["num_attractive_contacts"])
+    repulsive_contact_count = int(energy_eval["num_repulsive_contacts"])
+    neutral_contact_count = int(energy_eval["num_neutral_contacts"])
+    total_contact_count = int(energy_eval["num_face_contacts"])
 
     validity_score = float(
         100.0
@@ -239,8 +231,8 @@ def evaluate_structure_scores(
     )
     fitness_score = float(100.0 * matched_face_ratio)
     dipole_score = float(
-        100.0 * (attractive_contact_area + 0.5 * neutral_contact_area) / total_contact_area
-    ) if total_contact_area > EPS else 50.0
+        100.0 * (float(attractive_contact_count) + 0.5 * float(neutral_contact_count)) / float(total_contact_count)
+    ) if total_contact_count > 0 else 50.0
 
     metrics: Dict[str, float | int | bool] = {
         "num_bricks": int(num_bricks),
@@ -257,12 +249,22 @@ def evaluate_structure_scores(
         "max_pair_overlap_volume": float(max_pair_overlap),
         "overlap_tolerance_per_pair": float(OVERLAP_TOLERANCE_PER_PAIR),
         "severe_overlap_threshold": float(SEVERE_OVERLAP_THRESHOLD),
-        "attractive_contact_area": float(attractive_contact_area),
-        "repulsive_contact_area": float(repulsive_contact_area),
-        "neutral_contact_area": float(neutral_contact_area),
-        "total_contact_area": float(total_contact_area),
-        "weighted_dipole_energy": float(weighted_dipole_energy),
-        "mean_weighted_dipole_energy": float(weighted_dipole_energy / total_contact_area) if total_contact_area > EPS else 0.0,
+        "attractive_contact_count": int(attractive_contact_count),
+        "repulsive_contact_count": int(repulsive_contact_count),
+        "neutral_contact_count": int(neutral_contact_count),
+        "total_contact_count": int(total_contact_count),
+        "dipole_total_energy": float(energy_eval["total_energy"]),
+        "dipole_polar_cost": float(energy_eval["polar_cost"]),
+        "dipole_contact_energy": float(energy_eval["contact_energy"]),
+        "mean_dipole_energy_per_face": float(energy_eval["mean_energy_per_face"]),
+        "dipole_eval_error": dipole_eval_error,
+        # Backward-compatible aliases used by visualizer/report tables.
+        "attractive_contact_area": float(attractive_contact_count),
+        "repulsive_contact_area": float(repulsive_contact_count),
+        "neutral_contact_area": float(neutral_contact_count),
+        "total_contact_area": float(total_contact_count),
+        "weighted_dipole_energy": float(energy_eval["total_energy"]),
+        "mean_weighted_dipole_energy": float(energy_eval["mean_energy_per_face"]),
         "is_valid_like": bool(
             effective_overlap_volume <= VALID_LIKE_EFFECTIVE_OVERLAP
             and severe_overlapping_pairs == 0

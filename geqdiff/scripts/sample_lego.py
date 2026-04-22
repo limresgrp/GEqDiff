@@ -24,8 +24,6 @@ from geqdiff.utils.dipole_utils import (
     combine_shape_irreps,
     dipole_strengths,
     normalize_dipole_directions,
-    normalize_rows,
-    split_shape_irreps,
 )
 from geqdiff.utils.feature_utils import invert_scalar_normalization
 from geqdiff.scripts.evaluate_lego_samples import build_evaluation_report
@@ -36,9 +34,6 @@ from lego.utils import decode_brick_signatures, load_samples, save_samples
 STATE_FIELD_SPECS = (
     ("pos", "velocity"),
     ("shape_features", "shape_features_velocity"),
-    ("shape_scalar_features", "shape_scalar_velocity"),
-    ("shape_equiv_features", "shape_equiv_velocity"),
-    ("dipole_strength", "dipole_strength_velocity"),
     ("dipole_direction", "dipole_direction_velocity"),
 )
 
@@ -50,16 +45,11 @@ def _default_noise_like(
     num_nodes: int,
     generator: torch.Generator,
     device: torch.device,
-    unit_norm_noise: bool = True,
+    unit_norm_noise: bool = False,
 ) -> torch.Tensor:
-    if field_name == "shape_equiv_features":
-        if unit_norm_noise:
-            return _random_shape_equiv_noise(num_nodes, generator=generator, device=device)
-        return torch.randn(data.shape, generator=generator, device=device, dtype=torch.float32)
-    if field_name == "dipole_direction":
-        if unit_norm_noise:
-            return _random_unit_vectors((num_nodes, int(data.shape[-1])), generator=generator, device=device)
-        return torch.randn(data.shape, generator=generator, device=device, dtype=torch.float32)
+    _ = field_name
+    _ = num_nodes
+    _ = unit_norm_noise
     return torch.randn(data.shape, generator=generator, device=device, dtype=torch.float32)
 
 
@@ -118,14 +108,6 @@ def parse_args() -> argparse.Namespace:
         help="Reverse integrator to use for flow matching. `heun` is slower but usually more accurate.",
     )
     parser.add_argument(
-        "--project-normalized-states",
-        action="store_true",
-        help=(
-            "Project direction-like state tensors to unit norm after each reverse step. "
-            "Disabled by default to avoid train/inference mismatch."
-        ),
-    )
-    parser.add_argument(
         "--late-refine-from-step",
         type=int,
         default=-1,
@@ -153,6 +135,15 @@ def parse_args() -> argparse.Namespace:
         "--save-intermediates",
         action="store_true",
         help="Save the full sampled trajectory for each example, including the initial noisy state and all reverse steps.",
+    )
+    parser.add_argument(
+        "--save-velocity-vectors",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When saving intermediates, also save per-step position displacement vectors "
+            "(predicted and guided). Ignored for models that do not output `velocity`."
+        ),
     )
     parser.add_argument(
         "--clash-guidance",
@@ -196,21 +187,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=5.0,
         help="Upper clamp for the auto guidance scale factor.",
-    )
-    parser.add_argument(
-        "--cohesion-guidance-strength",
-        type=float,
-        default=0.0,
-        help=(
-            "Optional additional guidance weight for a soft contact-count cohesion term. "
-            "This helps avoid reducing clashes by simply fragmenting the diffused assembly."
-        ),
-    )
-    parser.add_argument(
-        "--cohesion-guidance-target-contacts",
-        type=float,
-        default=1.5,
-        help="Desired soft contact count per diffused brick for the cohesion guidance term.",
     )
     parser.add_argument(
         "--save-metrics",
@@ -318,18 +294,6 @@ def infer_position_noise_center_mask_field(config: Dict) -> str:
     return ""
 
 
-def infer_project_normalized_states(config: Dict) -> bool:
-    return bool(config.get("project_normalized_states", True))
-
-
-def infer_direct_dipole_vector(config: Dict) -> bool:
-    return bool(config.get("direct_dipole_vector", False))
-
-
-def infer_direct_shape_vector(config: Dict) -> bool:
-    return bool(config.get("direct_shape_vector", False))
-
-
 def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
     model_cfg = config.get("model", {})
     stack = model_cfg.get("stack", [])
@@ -342,7 +306,7 @@ def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
             "center_noise": field == AtomicDataDict.POSITIONS_KEY,
             "noise_center_mask_field": "",
             "mask_field": "ligand_mask",
-            "unit_norm_noise": field in {"shape_equiv_features", "dipole_direction"},
+            "unit_norm_noise": False,
         }
         for field, out_field in STATE_FIELD_SPECS
     }
@@ -369,7 +333,7 @@ def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
         center_noise = bool(spec.get("center_noise", center_field))
         unit_norm_noise = spec.get("unit_norm_noise", "__auto__")
         if unit_norm_noise == "__auto__":
-            unit_norm_noise = field_name in {"shape_equiv_features", "dipole_direction"}
+            unit_norm_noise = False
         unit_norm_noise = bool(unit_norm_noise)
         noise_center_mask_field = spec.get("noise_center_mask_field", "__auto__")
         if noise_center_mask_field == "__auto__":
@@ -398,64 +362,6 @@ def infer_corrupt_field_settings(config: Dict) -> Dict[str, Dict[str, Any]]:
 def infer_corrupt_field_map(config: Dict) -> Dict[str, str]:
     settings = infer_corrupt_field_settings(config)
     return {field_name: str(spec["out_field"]) for field_name, spec in settings.items()}
-
-
-def infer_directional_velocity_couplings(config: Dict) -> List[Dict[str, Any]]:
-    model_cfg = config.get("model", {})
-    stack = model_cfg.get("stack", [])
-    if not (isinstance(stack, list) and len(stack) > 0 and isinstance(stack[0], dict)):
-        return []
-
-    flow_cfg = stack[0]
-    couplings = flow_cfg.get("directional_velocity_couplings", [])
-    if not isinstance(couplings, list):
-        return []
-
-    parsed: List[Dict[str, Any]] = []
-    for idx, coupling in enumerate(couplings):
-        if not isinstance(coupling, dict):
-            continue
-        scalar_out_field = str(coupling.get("scalar_out_field", ""))
-        equiv_out_field = str(coupling.get("equiv_out_field", ""))
-        block_pairs = coupling.get("block_pairs", [])
-        if scalar_out_field == "" or equiv_out_field == "" or not isinstance(block_pairs, list):
-            continue
-
-        scalar_indices: List[int] = []
-        equiv_starts: List[int] = []
-        equiv_stops: List[int] = []
-        for block_idx, block in enumerate(block_pairs):
-            if not isinstance(block, dict):
-                continue
-            scalar_index = int(block.get("scalar_index", -1))
-            equiv_slice = block.get("equiv_slice", None)
-            if scalar_index < 0 or not isinstance(equiv_slice, (list, tuple)) or len(equiv_slice) != 2:
-                raise ValueError(
-                    f"Invalid directional_velocity_couplings[{idx}].block_pairs[{block_idx}] entry."
-                )
-            start = int(equiv_slice[0])
-            stop = int(equiv_slice[1])
-            if stop <= start:
-                raise ValueError(
-                    f"Invalid equiv_slice [{start}, {stop}] in directional_velocity_couplings[{idx}]."
-                )
-            scalar_indices.append(scalar_index)
-            equiv_starts.append(start)
-            equiv_stops.append(stop)
-
-        if len(scalar_indices) == 0:
-            continue
-        parsed.append(
-            {
-                "scalar_out_field": scalar_out_field,
-                "equiv_out_field": equiv_out_field,
-                "scalar_indices": scalar_indices,
-                "equiv_starts": equiv_starts,
-                "equiv_stops": equiv_stops,
-                "nonnegative_scale": bool(coupling.get("nonnegative_scale", True)),
-            }
-        )
-    return parsed
 
 
 def build_edge_index(positions: torch.Tensor, cutoff: float) -> torch.Tensor:
@@ -515,6 +421,18 @@ def extract_example(data: Dict[str, np.ndarray], example_index: int) -> Dict[str
         "source_frame_id": np.asarray(data["source_frame_id"][example_index]).astype(np.int64),
         "split_id": np.asarray(data["split_id"][example_index]).astype(np.int64),
     }
+    if "sequence_position" in data:
+        seq = _slice_dense_field(data, "sequence_position", example_index, num_nodes).astype(np.int64)
+        if seq.ndim == 1:
+            seq = seq[:, None]
+        if seq.shape != (num_nodes, 1):
+            raise ValueError(
+                f"Expected sequence_position shape {(num_nodes, 1)}, got {seq.shape}."
+            )
+        example["sequence_position"] = seq
+    else:
+        # Backward-compatible fallback for older diffusion datasets.
+        example["sequence_position"] = np.arange(num_nodes, dtype=np.int64)[:, None]
     for field in (
         "shape_features_raw",
         "shape_scalar_features_raw",
@@ -660,6 +578,8 @@ def _trajectory_snapshot(
     stage_label: str,
     scheduler_step: int,
     tau: float,
+    velocity_vectors: torch.Tensor | None = None,
+    velocity_raw_vectors: torch.Tensor | None = None,
 ) -> Dict[str, np.ndarray]:
     snapshot = _decode_sampled_structure(
         state,
@@ -672,6 +592,10 @@ def _trajectory_snapshot(
     snapshot["stage_label"] = np.asarray(stage_label)
     snapshot["scheduler_step"] = np.asarray(scheduler_step, dtype=np.int64)
     snapshot["tau"] = np.asarray(tau, dtype=np.float32)
+    if velocity_vectors is not None:
+        snapshot["velocity_vectors"] = velocity_vectors.detach().cpu().numpy().astype(np.float32)
+    if velocity_raw_vectors is not None:
+        snapshot["velocity_raw_vectors"] = velocity_raw_vectors.detach().cpu().numpy().astype(np.float32)
     return snapshot
 
 
@@ -834,6 +758,7 @@ def _build_model_input(
     *,
     batch: torch.Tensor,
     node_types: torch.Tensor,
+    sequence_position: torch.Tensor | None,
     rotations: torch.Tensor,
     tau_value: float,
     r_max: float,
@@ -858,6 +783,8 @@ def _build_model_input(
     }
     if "shape_features" in state:
         payload[AtomicDataDict.SHAPE_FEATURES_KEY] = state["shape_features"]
+    if sequence_position is not None:
+        payload["sequence_position"] = sequence_position
     return payload
 
 
@@ -1066,79 +993,6 @@ def _shape_aware_clash_energy(
     return penalties[finite].mean()
 
 
-def _shape_aware_cohesion_energy(
-    pred_pos_0: torch.Tensor,
-    pred_shape_coeffs_detached: torch.Tensor,
-    ligand_mask: torch.Tensor,
-    pocket_mask: torch.Tensor,
-    *,
-    pair_cutoff: float = 3.5,
-    contact_margin: float = 0.20,
-    contact_sharpness: float = 8.0,
-    target_contacts: float = 1.5,
-) -> torch.Tensor:
-    num_nodes = int(pred_pos_0.shape[0])
-    if num_nodes < 2:
-        return pred_pos_0.new_zeros(())
-
-    idx_i, idx_j = torch.triu_indices(num_nodes, num_nodes, offset=1, device=pred_pos_0.device)
-    if idx_i.numel() == 0:
-        return pred_pos_0.new_zeros(())
-
-    lig_i = ligand_mask[idx_i]
-    lig_j = ligand_mask[idx_j]
-    poc_i = pocket_mask[idx_i]
-    poc_j = pocket_mask[idx_j]
-    pair_mask = (lig_i & lig_j) | (lig_i & poc_j) | (poc_i & lig_j)
-    if not torch.any(pair_mask):
-        return pred_pos_0.new_zeros(())
-
-    idx_i = idx_i[pair_mask]
-    idx_j = idx_j[pair_mask]
-    lig_i = lig_i[pair_mask]
-    lig_j = lig_j[pair_mask]
-    deltas = pred_pos_0[idx_j] - pred_pos_0[idx_i]
-    distances = torch.linalg.norm(deltas, dim=-1)
-    valid = torch.isfinite(distances) & (distances > 1e-6) & (distances < float(pair_cutoff))
-    if not torch.any(valid):
-        return pred_pos_0.new_zeros(())
-
-    idx_i = idx_i[valid]
-    idx_j = idx_j[valid]
-    lig_i = lig_i[valid]
-    lig_j = lig_j[valid]
-    deltas = deltas[valid]
-    distances = distances[valid]
-    directions = deltas / distances.unsqueeze(-1)
-
-    extent_i = _directional_extent(pred_shape_coeffs_detached[idx_i], directions)
-    extent_j = _directional_extent(pred_shape_coeffs_detached[idx_j], -directions)
-    contact_logits = float(contact_sharpness) * (extent_i + extent_j + float(contact_margin) - distances)
-    contact_scores = torch.sigmoid(contact_logits)
-    finite = torch.isfinite(contact_scores)
-    if not torch.any(finite):
-        return pred_pos_0.new_zeros(())
-
-    idx_i = idx_i[finite]
-    idx_j = idx_j[finite]
-    lig_i = lig_i[finite]
-    lig_j = lig_j[finite]
-    contact_scores = contact_scores[finite]
-
-    per_node_contacts = pred_pos_0.new_zeros((num_nodes,), dtype=torch.float32)
-    if torch.any(lig_i):
-        per_node_contacts.scatter_add_(0, idx_i[lig_i], contact_scores[lig_i])
-    if torch.any(lig_j):
-        per_node_contacts.scatter_add_(0, idx_j[lig_j], contact_scores[lig_j])
-
-    ligand_contacts = per_node_contacts[ligand_mask]
-    if ligand_contacts.numel() == 0:
-        return pred_pos_0.new_zeros(())
-
-    deficits = torch.nn.functional.relu(float(target_contacts) - ligand_contacts)
-    return torch.mean(deficits.square())
-
-
 def _apply_clash_guidance(
     output: Dict[str, torch.Tensor],
     state: Dict[str, torch.Tensor],
@@ -1151,8 +1005,6 @@ def _apply_clash_guidance(
     guidance_auto_scale: bool,
     guidance_auto_scale_min: float,
     guidance_auto_scale_max: float,
-    cohesion_guidance_strength: float,
-    cohesion_guidance_target_contacts: float,
 ) -> Dict[str, torch.Tensor]:
     if (not guidance_enabled) or guidance_strength <= 0.0 or tau_value <= 1e-8:
         return output
@@ -1173,11 +1025,19 @@ def _apply_clash_guidance(
     if schedule_weight <= 1e-8:
         return output
 
+    tau_safe = float(max(tau_value, 1e-6))
+    one_minus_tau_safe = float(max(1.0 - tau_value, 1e-6))
+
+    x_tau = state["pos"].detach().to(dtype=torch.float32)
+    velocity_ref = output["velocity"].detach().to(dtype=torch.float32)
+
     with torch.enable_grad():
-        pred_pos_0 = (
-            state["pos"].detach().to(dtype=torch.float32)
-            - tau_value * output["velocity"].detach().to(dtype=torch.float32)
-        ).clone().requires_grad_(True)
+        # Compute guidance gradient in x_tau space (stop-grad through model velocity).
+        # For the linear FM path x_tau=(1-tau)x0+tau*noise and velocity target x_noise-x0:
+        #   x0_hat = x_tau - tau * v_theta
+        # so dE/dx_tau is directly usable for score-space conditioning.
+        x_tau_req = x_tau.clone().requires_grad_(True)
+        pred_pos_0 = x_tau_req - tau_value * velocity_ref
         if "shape_features_velocity" in output and "shape_features" in state:
             pred_shape_coeffs = (
                 state["shape_features"].detach().to(dtype=torch.float32)
@@ -1201,39 +1061,32 @@ def _apply_clash_guidance(
             state["ligand_mask"].detach(),
             state["pocket_mask"].detach(),
         )
-        guidance_energy = clash_energy
-        if float(cohesion_guidance_strength) > 0.0:
-            cohesion_energy = _shape_aware_cohesion_energy(
-                pred_pos_0,
-                pred_shape_coeffs,
-                state["ligand_mask"].detach(),
-                state["pocket_mask"].detach(),
-                target_contacts=float(cohesion_guidance_target_contacts),
-            )
-            guidance_energy = guidance_energy + float(cohesion_guidance_strength) * cohesion_energy
-        if float(guidance_energy.detach().item()) <= 0.0:
+        if float(clash_energy.detach().item()) <= 0.0:
             return output
-        grad_pos = torch.autograd.grad(guidance_energy, pred_pos_0, allow_unused=False)[0]
+        grad_x_tau = torch.autograd.grad(clash_energy, x_tau_req, allow_unused=False)[0]
 
     ligand_mask = state["ligand_mask"].detach().unsqueeze(-1)
-    grad_pos = torch.where(ligand_mask, grad_pos, torch.zeros_like(grad_pos))
+    grad_x_tau = torch.where(ligand_mask, grad_x_tau, torch.zeros_like(grad_x_tau))
     if guidance_max_norm > 0.0:
-        grad_norm = torch.linalg.norm(grad_pos, dim=-1, keepdim=True)
+        grad_norm = torch.linalg.norm(grad_x_tau, dim=-1, keepdim=True)
         clip = torch.clamp(float(guidance_max_norm) / torch.clamp(grad_norm, min=1e-8), max=1.0)
-        grad_pos = grad_pos * clip
+        grad_x_tau = grad_x_tau * clip
 
     scale_multiplier = 1.0
+    # Convert model velocity to score for the linear FM path:
+    #   s_theta(x_tau, tau) = -(x_tau + (1 - tau) * v_theta) / tau
+    score_ref = -(x_tau + (1.0 - tau_value) * velocity_ref) / tau_safe
+    score_ref = torch.where(ligand_mask, score_ref, torch.zeros_like(score_ref))
+
     if guidance_auto_scale:
         ligand_mask_flat = state["ligand_mask"].detach().reshape(-1)
-        velocity_ref = output["velocity"].detach().to(dtype=torch.float32)
-        velocity_ref = torch.where(ligand_mask_flat.unsqueeze(-1), velocity_ref, torch.zeros_like(velocity_ref))
-        vel_norm = torch.linalg.norm(velocity_ref[ligand_mask_flat], dim=-1)
-        guide_norm = torch.linalg.norm(grad_pos[ligand_mask_flat], dim=-1)
-        finite_mask = torch.isfinite(vel_norm) & torch.isfinite(guide_norm) & (guide_norm > 1e-8)
+        score_norm = torch.linalg.norm(score_ref[ligand_mask_flat], dim=-1)
+        guide_norm = torch.linalg.norm(grad_x_tau[ligand_mask_flat], dim=-1)
+        finite_mask = torch.isfinite(score_norm) & torch.isfinite(guide_norm) & (guide_norm > 1e-8)
         if torch.any(finite_mask):
-            vel_rms = torch.sqrt(torch.mean(vel_norm[finite_mask] ** 2))
+            score_rms = torch.sqrt(torch.mean(score_norm[finite_mask] ** 2))
             guide_rms = torch.sqrt(torch.mean(guide_norm[finite_mask] ** 2))
-            scale_multiplier = float((vel_rms / torch.clamp(guide_rms, min=1e-8)).item())
+            scale_multiplier = float((score_rms / torch.clamp(guide_rms, min=1e-8)).item())
             scale_multiplier = float(
                 np.clip(
                     scale_multiplier,
@@ -1242,11 +1095,17 @@ def _apply_clash_guidance(
                 )
             )
 
+    # ExEnDiff-style conditioning in score space:
+    #   s_cond = s_theta - lambda * grad_x_tau E
+    # then map back to velocity:
+    #   v_cond = -(x_tau + tau * s_cond) / (1 - tau)
+    guidance_scale = float(guidance_strength) * float(schedule_weight) * float(scale_multiplier)
+    score_cond = score_ref - guidance_scale * grad_x_tau
+    velocity_cond = -(x_tau + tau_value * score_cond) / one_minus_tau_safe
+    velocity_cond = torch.where(ligand_mask, velocity_cond, velocity_ref)
+
     guided = dict(output)
-    guided["velocity"] = output["velocity"] + float(guidance_strength) * float(schedule_weight) * float(scale_multiplier) * grad_pos.to(
-        device=output["velocity"].device,
-        dtype=output["velocity"].dtype,
-    )
+    guided["velocity"] = velocity_cond.to(device=output["velocity"].device, dtype=output["velocity"].dtype)
     return guided
 
 
@@ -1297,6 +1156,7 @@ def sample_example(
     corrupt_field_settings: Dict[str, Dict[str, Any]],
     directional_velocity_couplings: Sequence[Dict[str, Any]],
     save_intermediates: bool,
+    save_velocity_vectors: bool,
     sampler_name: str,
     late_refine_from_step: int,
     late_refine_factor: int,
@@ -1309,8 +1169,6 @@ def sample_example(
     clash_guidance_auto_scale: bool,
     clash_guidance_auto_scale_min: float,
     clash_guidance_auto_scale_max: float,
-    cohesion_guidance_strength: float,
-    cohesion_guidance_target_contacts: float,
 ) -> Dict[str, np.ndarray]:
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
@@ -1331,6 +1189,9 @@ def sample_example(
     )
     batch = torch.zeros((int(example["num_nodes"]),), dtype=torch.long, device=device)
     node_types = torch.as_tensor(example["node_types"], dtype=torch.long, device=device).unsqueeze(-1)
+    sequence_position = torch.as_tensor(example.get("sequence_position"), dtype=torch.long, device=device)
+    if sequence_position.ndim == 1:
+        sequence_position = sequence_position.unsqueeze(-1)
     rotations = torch.as_tensor(example["rotations"], dtype=torch.float32, device=device)
 
     schedule = _build_sampling_schedule(
@@ -1369,16 +1230,18 @@ def sample_example(
             state,
             batch=batch,
             node_types=node_types,
+            sequence_position=sequence_position,
             rotations=rotations,
             tau_value=tau_value,
             r_max=r_max,
             device=device,
         )
+        raw_output = _compose_directional_velocity_outputs(
+            model(batch_input),
+            couplings=directional_velocity_couplings,
+        )
         output = _apply_clash_guidance(
-            _compose_directional_velocity_outputs(
-                model(batch_input),
-                couplings=directional_velocity_couplings,
-            ),
+            raw_output,
             state,
             tau_value=tau_value,
             guidance_enabled=clash_guidance,
@@ -1388,8 +1251,6 @@ def sample_example(
             guidance_auto_scale=clash_guidance_auto_scale,
             guidance_auto_scale_min=clash_guidance_auto_scale_min,
             guidance_auto_scale_max=clash_guidance_auto_scale_max,
-            cohesion_guidance_strength=cohesion_guidance_strength,
-            cohesion_guidance_target_contacts=cohesion_guidance_target_contacts,
         )
         euler_states = _euler_candidate_states(
             state,
@@ -1412,16 +1273,18 @@ def sample_example(
                 provisional_state,
                 batch=batch,
                 node_types=node_types,
+                sequence_position=sequence_position,
                 rotations=rotations,
                 tau_value=tau_next_value,
                 r_max=r_max,
                 device=device,
             )
+            raw_output_next = _compose_directional_velocity_outputs(
+                model(batch_input_next),
+                couplings=directional_velocity_couplings,
+            )
             output_next = _apply_clash_guidance(
-                _compose_directional_velocity_outputs(
-                    model(batch_input_next),
-                    couplings=directional_velocity_couplings,
-                ),
+                raw_output_next,
                 provisional_state,
                 tau_value=tau_next_value,
                 guidance_enabled=clash_guidance,
@@ -1431,8 +1294,6 @@ def sample_example(
                 guidance_auto_scale=clash_guidance_auto_scale,
                 guidance_auto_scale_min=clash_guidance_auto_scale_min,
                 guidance_auto_scale_max=clash_guidance_auto_scale_max,
-                cohesion_guidance_strength=cohesion_guidance_strength,
-                cohesion_guidance_target_contacts=cohesion_guidance_target_contacts,
             )
             next_states = {
                 "pos": state["pos"],
@@ -1467,6 +1328,26 @@ def sample_example(
             ),
         )
         if save_intermediates:
+            velocity_vectors = None
+            velocity_raw_vectors = None
+            if save_velocity_vectors and "velocity" in output:
+                if tau_next_value <= 0.0:
+                    velocity_vectors = torch.zeros_like(output["velocity"])
+                else:
+                    velocity_vectors = sampler.dtau_from_values(
+                        x_t=state["pos"],
+                        tau_t=tau_value,
+                        tau_prev=tau_next_value,
+                    ).to(dtype=state["pos"].dtype) * output["velocity"]
+            if save_velocity_vectors and "velocity" in raw_output:
+                if tau_next_value <= 0.0:
+                    velocity_raw_vectors = torch.zeros_like(raw_output["velocity"])
+                else:
+                    velocity_raw_vectors = sampler.dtau_from_values(
+                        x_t=state["pos"],
+                        tau_t=tau_value,
+                        tau_prev=tau_next_value,
+                    ).to(dtype=state["pos"].dtype) * raw_output["velocity"]
             if tau_next_value > 0.0:
                 stage_label = f"step {step_idx + 1}/{len(schedule)}"
                 tau_stage_value = tau_next_value
@@ -1486,6 +1367,8 @@ def sample_example(
                     stage_label=stage_label,
                     scheduler_step=scheduler_step,
                     tau=tau_stage_value,
+                    velocity_vectors=velocity_vectors,
+                    velocity_raw_vectors=velocity_raw_vectors,
                 )
             )
 
@@ -1546,8 +1429,6 @@ def sample_example(
         "sampling_clash_guidance_auto_scale": np.asarray(bool(clash_guidance_auto_scale)),
         "sampling_clash_guidance_auto_scale_min": np.asarray(float(clash_guidance_auto_scale_min), dtype=np.float32),
         "sampling_clash_guidance_auto_scale_max": np.asarray(float(clash_guidance_auto_scale_max), dtype=np.float32),
-        "sampling_cohesion_guidance_strength": np.asarray(float(cohesion_guidance_strength), dtype=np.float32),
-        "sampling_cohesion_guidance_target_contacts": np.asarray(float(cohesion_guidance_target_contacts), dtype=np.float32),
     }
     if save_intermediates:
         sample["intermediate_states"] = np.asarray(trajectory, dtype=object)
@@ -1645,6 +1526,7 @@ def main(args: argparse.Namespace | None = None) -> None:
             corrupt_field_settings=corrupt_field_settings,
             directional_velocity_couplings=directional_velocity_couplings,
             save_intermediates=bool(args.save_intermediates),
+            save_velocity_vectors=bool(args.save_velocity_vectors),
             sampler_name=str(args.sampler),
             late_refine_from_step=int(args.late_refine_from_step),
             late_refine_factor=int(args.late_refine_factor),
@@ -1657,8 +1539,6 @@ def main(args: argparse.Namespace | None = None) -> None:
             clash_guidance_auto_scale=bool(args.clash_guidance_auto_scale),
             clash_guidance_auto_scale_min=float(args.clash_guidance_auto_scale_min),
             clash_guidance_auto_scale_max=float(args.clash_guidance_auto_scale_max),
-            cohesion_guidance_strength=float(args.cohesion_guidance_strength),
-            cohesion_guidance_target_contacts=float(args.cohesion_guidance_target_contacts),
         )
         sample["conditioning_example_index"] = np.asarray(example_index, dtype=np.int64)
         samples.append(enrich_from_canonical_source(sample, source_samples=source_samples))

@@ -380,6 +380,10 @@ def _normalize_sample(sample):
         sample["scheduler_step"] = np.asarray(sample["scheduler_step"], dtype=np.int64)
     if "tau" in sample:
         sample["tau"] = np.asarray(sample["tau"], dtype=np.float32)
+    if "velocity_vectors" in sample:
+        sample["velocity_vectors"] = np.asarray(sample["velocity_vectors"], dtype=np.float32)
+    if "velocity_raw_vectors" in sample:
+        sample["velocity_raw_vectors"] = np.asarray(sample["velocity_raw_vectors"], dtype=np.float32)
     if "sampling_sampler" in sample:
         sample["sampling_sampler"] = np.asarray(sample["sampling_sampler"]).astype(str)
     if "sampling_steps" in sample:
@@ -406,11 +410,6 @@ def _normalize_sample(sample):
         sample["sampling_clash_guidance_auto_scale_min"] = np.asarray(sample["sampling_clash_guidance_auto_scale_min"], dtype=np.float32)
     if "sampling_clash_guidance_auto_scale_max" in sample:
         sample["sampling_clash_guidance_auto_scale_max"] = np.asarray(sample["sampling_clash_guidance_auto_scale_max"], dtype=np.float32)
-    if "sampling_cohesion_guidance_strength" in sample:
-        sample["sampling_cohesion_guidance_strength"] = np.asarray(sample["sampling_cohesion_guidance_strength"], dtype=np.float32)
-    if "sampling_cohesion_guidance_target_contacts" in sample:
-        sample["sampling_cohesion_guidance_target_contacts"] = np.asarray(sample["sampling_cohesion_guidance_target_contacts"], dtype=np.float32)
-
     if "original_brick_anchors" in sample or "original_pos" in sample:
         original_brick_anchors = sample.get("original_brick_anchors", sample.get("original_pos"))
         original_brick_types = sample.get("original_brick_types", sample.get("original_types", brick_types))
