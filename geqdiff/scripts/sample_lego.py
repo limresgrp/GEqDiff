@@ -21,14 +21,12 @@ from geqdiff.data import AtomicDataDict
 from geqdiff.utils import FlowMatchingHeunSampler, FlowMatchingSampler, FlowMatchingScheduler
 from geqdiff.utils.diffusion import center_pos, compute_reference_mean
 from geqdiff.utils.dipole_utils import (
-    combine_shape_irreps,
     dipole_strengths,
     normalize_dipole_directions,
 )
-from geqdiff.utils.feature_utils import invert_scalar_normalization
 from geqdiff.scripts.evaluate_lego_samples import build_evaluation_report
 from geqtrain.train.components.checkpointing import CheckpointHandler
-from lego.utils import decode_brick_signatures, load_samples, save_samples
+from lego.utils import load_samples, save_samples
 
 
 STATE_FIELD_SPECS = (
@@ -199,6 +197,22 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional explicit path for the saved evaluation JSON.",
+    )
+    parser.add_argument(
+        "--shape-decode-mode",
+        type=str,
+        default="input_knn",
+        choices=("input_knn", "keep_original"),
+        help=(
+            "How to convert predicted continuous shape features to discrete brick type/rotation. "
+            "`input_knn` decodes against shape/type exemplars from the input dataset."
+        ),
+    )
+    parser.add_argument(
+        "--shape-decode-max-candidates",
+        type=int,
+        default=2048,
+        help="Maximum number of candidates used by `input_knn` shape decoding.",
     )
     return parser.parse_args()
 
@@ -398,23 +412,18 @@ def _slice_dense_field(data: Dict[str, np.ndarray], field: str, example_index: i
 
 def extract_example(data: Dict[str, np.ndarray], example_index: int) -> Dict[str, np.ndarray]:
     num_nodes = int(np.asarray(data["num_nodes"])[example_index])
-    shape_scalar_features = _slice_dense_field(data, "shape_scalar_features", example_index, num_nodes).astype(np.float32)
-    shape_equiv_features = _slice_dense_field(data, "shape_equiv_features", example_index, num_nodes).astype(np.float32)
     if "shape_features" in data:
         shape_features = _slice_dense_field(data, "shape_features", example_index, num_nodes).astype(np.float32)
     elif "shape_features_raw" in data:
         shape_features = _slice_dense_field(data, "shape_features_raw", example_index, num_nodes).astype(np.float32)
     else:
-        shape_features = combine_shape_irreps(shape_scalar_features, shape_equiv_features).astype(np.float32)
+        raise KeyError("Input diffusion dataset is missing `shape_features` (or `shape_features_raw`).")
 
     example: Dict[str, np.ndarray] = {
         "num_nodes": np.asarray(num_nodes, dtype=np.int64),
         "pos": _slice_dense_field(data, "pos", example_index, num_nodes).astype(np.float32),
         "rotations": _slice_dense_field(data, "rotations", example_index, num_nodes).astype(np.float32),
         "shape_features": shape_features,
-        "shape_scalar_features": shape_scalar_features,
-        "shape_equiv_features": shape_equiv_features,
-        "dipole_strength": _slice_dense_field(data, "dipole_strength", example_index, num_nodes).astype(np.float32),
         "dipole_direction": _slice_dense_field(data, "dipole_direction", example_index, num_nodes).astype(np.float32),
         "ligand_mask": _slice_dense_field(data, "ligand_mask", example_index, num_nodes).astype(bool).reshape(num_nodes),
         "pocket_mask": _slice_dense_field(data, "pocket_mask", example_index, num_nodes).astype(bool).reshape(num_nodes),
@@ -435,10 +444,7 @@ def extract_example(data: Dict[str, np.ndarray], example_index: int) -> Dict[str
         example["sequence_position"] = np.arange(num_nodes, dtype=np.int64)[:, None]
     for field in (
         "shape_features_raw",
-        "shape_scalar_features_raw",
-        "shape_equiv_features_raw",
         "brick_dipoles_raw",
-        "dipole_strength_raw",
         "dipole_direction_raw",
     ):
         if field in data:
@@ -460,95 +466,129 @@ def extract_example(data: Dict[str, np.ndarray], example_index: int) -> Dict[str
     return example
 
 
-def extract_scalar_normalization(data: Dict[str, np.ndarray]) -> Dict[str, Dict[str, np.ndarray]]:
-    enabled = bool(int(np.asarray(data.get("scalar_normalization_enabled", [0])).reshape(-1)[0]))
-    if not enabled:
-        return {}
+def _dataset_types_matrix(data: Dict[str, np.ndarray]) -> np.ndarray:
+    if "types" in data:
+        return np.asarray(data["types"]).astype(str)
+    if "type_vocab" in data and "node_types" in data:
+        type_vocab = np.asarray(data["type_vocab"]).astype(str).tolist()
+        node_types = np.asarray(data["node_types"], dtype=np.int64)
+        out = np.empty(node_types.shape, dtype=f"<U{max(len(v) for v in type_vocab)}")
+        for idx, token in enumerate(type_vocab):
+            out[node_types == idx] = str(token)
+        return out
+    raise KeyError("Input diffusion dataset is missing both `types` and (`type_vocab` + `node_types`).")
 
-    output = {}
-    for field, prefix in (("shape_scalar_features", "shape_scalar"), ("dipole_strength", "dipole_strength")):
-        means_key = f"{prefix}_means"
-        stds_key = f"{prefix}_stds"
-        if means_key not in data or stds_key not in data:
+
+def _dataset_shape_features_matrix(data: Dict[str, np.ndarray]) -> np.ndarray:
+    if "shape_features_raw" in data:
+        return np.asarray(data["shape_features_raw"], dtype=np.float32)
+    if "shape_features" in data:
+        return np.asarray(data["shape_features"], dtype=np.float32)
+    raise KeyError(
+        "Input diffusion dataset is missing shape features. Expected one of "
+        "`shape_features_raw` or `shape_features`."
+    )
+
+
+def _decode_with_input_knn(
+    signatures: np.ndarray,
+    decode_library: Dict[str, np.ndarray],
+) -> Dict[str, np.ndarray]:
+    x = np.asarray(signatures, dtype=np.float32)
+    y = np.asarray(decode_library["features"], dtype=np.float32)
+    if x.ndim != 2 or x.shape[-1] != 16:
+        raise ValueError(f"Expected signatures shape [N,16], got {x.shape}.")
+    if y.ndim != 2 or y.shape[-1] != 16:
+        raise ValueError(f"Expected decode-library features shape [M,16], got {y.shape}.")
+    x2 = np.sum(x * x, axis=-1, keepdims=True)
+    y2 = np.sum(y * y, axis=-1)[None, :]
+    distances2 = np.maximum(0.0, x2 + y2 - 2.0 * (x @ y.T))
+    indices = np.argmin(distances2, axis=1).astype(np.int64)
+    distances = np.sqrt(np.take_along_axis(distances2, indices[:, None], axis=1).reshape(-1)).astype(np.float32)
+    return {
+        "brick_types": np.asarray(decode_library["types"])[indices].astype(str),
+        "rotations": np.asarray(decode_library["rotations"], dtype=np.float32)[indices],
+        "indices": indices,
+        "distances": distances,
+    }
+
+
+def _build_input_knn_decode_library(
+    data: Dict[str, np.ndarray],
+    *,
+    max_candidates: int,
+    seed: int,
+) -> Dict[str, np.ndarray]:
+    max_candidates = int(max(max_candidates, 1))
+    num_nodes = np.asarray(data["num_nodes"], dtype=np.int64).reshape(-1)
+    rotations_all = np.asarray(data["rotations"], dtype=np.float32)
+    shape_all = _dataset_shape_features_matrix(data)
+    types_all = _dataset_types_matrix(data)
+    ligand_all = np.asarray(data.get("ligand_mask"), dtype=bool) if "ligand_mask" in data else None
+
+    features_list: List[np.ndarray] = []
+    types_list: List[np.ndarray] = []
+    rotations_list: List[np.ndarray] = []
+    for example_idx in range(int(num_nodes.shape[0])):
+        nn = int(num_nodes[example_idx])
+        if nn <= 0:
             continue
-        output[field] = {
-            "means": np.asarray(data[means_key], dtype=np.float32),
-            "stds": np.asarray(data[stds_key], dtype=np.float32),
-        }
-    return output
+        select = np.ones((nn,), dtype=bool)
+        if ligand_all is not None:
+            select = np.asarray(ligand_all[example_idx, :nn], dtype=bool).reshape(nn)
+            if not np.any(select):
+                continue
+        features_list.append(np.asarray(shape_all[example_idx, :nn], dtype=np.float32)[select])
+        types_list.append(np.asarray(types_all[example_idx, :nn]).astype(str)[select])
+        rotations_list.append(np.asarray(rotations_all[example_idx, :nn], dtype=np.float32)[select])
 
+    if len(features_list) == 0:
+        raise ValueError("Could not build shape decode library from input dataset: no candidate nodes found.")
 
-def _random_unit_vectors(shape: tuple[int, int], generator: torch.Generator, device: torch.device) -> torch.Tensor:
-    noise = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
-    norms = torch.linalg.norm(noise, dim=-1, keepdim=True)
-    return noise / torch.clamp(norms, min=1e-8)
+    features = np.concatenate(features_list, axis=0).astype(np.float32)
+    types = np.concatenate(types_list, axis=0).astype(str)
+    rotations = np.concatenate(rotations_list, axis=0).astype(np.float32)
 
+    if features.shape[0] > max_candidates:
+        rng = np.random.default_rng(int(seed))
+        keep = rng.choice(features.shape[0], size=max_candidates, replace=False)
+        features = features[keep]
+        types = types[keep]
+        rotations = rotations[keep]
 
-def _random_shape_equiv_noise(num_nodes: int, generator: torch.Generator, device: torch.device) -> torch.Tensor:
-    parts = [
-        _random_unit_vectors((num_nodes, 3), generator=generator, device=device),
-        _random_unit_vectors((num_nodes, 5), generator=generator, device=device),
-        _random_unit_vectors((num_nodes, 7), generator=generator, device=device),
-    ]
-    return torch.cat(parts, dim=-1)
-
-
-def _project_shape_equiv(values: torch.Tensor) -> torch.Tensor:
-    parts = []
-    for start, stop in ((0, 3), (3, 8), (8, 15)):
-        block = values[..., start:stop]
-        norm = torch.linalg.norm(block, dim=-1, keepdim=True)
-        parts.append(block / torch.clamp(norm, min=1e-8))
-    return torch.cat(parts, dim=-1)
-
-
-def _project_dipole_direction(values: torch.Tensor) -> torch.Tensor:
-    norm = torch.linalg.norm(values, dim=-1, keepdim=True)
-    return values / torch.clamp(norm, min=1e-8)
+    return {
+        "features": features.astype(np.float32),
+        "types": types.astype(str),
+        "rotations": rotations.astype(np.float32),
+    }
 
 
 def _decode_sampled_structure(
     state: Dict[str, torch.Tensor],
     example: Dict[str, np.ndarray],
-    scalar_normalization: Dict[str, Dict[str, np.ndarray]],
-    direct_shape_vector: bool = False,
-    direct_dipole_vector: bool = False,
+    shape_decode_mode: str,
+    shape_decode_library: Dict[str, np.ndarray] | None = None,
 ) -> Dict[str, np.ndarray]:
     sampled_pos = (state["pos"] + state["centroid"]).detach().cpu().numpy().astype(np.float32)
-    sampled_dipole_direction_state = state["dipole_direction"].detach().cpu().numpy().astype(np.float32)
+    sampled_shape = state["shape_features"].detach().cpu().numpy().astype(np.float32)
+    sampled_dipoles = state["dipole_direction"].detach().cpu().numpy().astype(np.float32)
+    sampled_dipole_strength = dipole_strengths(sampled_dipoles).astype(np.float32)
+    sampled_dipole_direction = normalize_dipole_directions(sampled_dipoles).astype(np.float32)
 
-    if direct_shape_vector:
-        sampled_shape = state["shape_features"].detach().cpu().numpy().astype(np.float32)
-        sampled_shape_scalar, sampled_shape_equiv = split_shape_irreps(sampled_shape)
+    mode = str(shape_decode_mode).strip().lower()
+    if mode == "input_knn":
+        if shape_decode_library is None:
+            raise ValueError("shape_decode_mode='input_knn' requires a non-empty decode library.")
+        decoded_library = _decode_with_input_knn(sampled_shape, shape_decode_library)
+    elif mode == "keep_original":
+        decoded_library = {
+            "brick_types": np.asarray(example["types"]).astype(str),
+            "rotations": np.asarray(example["rotations"], dtype=np.float32),
+            "indices": np.full((sampled_shape.shape[0],), -1, dtype=np.int64),
+            "distances": np.zeros((sampled_shape.shape[0],), dtype=np.float32),
+        }
     else:
-        sampled_shape_scalar_model = state["shape_scalar_features"].detach().cpu().numpy().astype(np.float32)
-        sampled_shape_equiv = _project_shape_equiv(state["shape_equiv_features"]).detach().cpu().numpy().astype(np.float32)
-        sampled_shape_scalar = (
-            invert_scalar_normalization(sampled_shape_scalar_model, scalar_normalization["shape_scalar_features"]).astype(np.float32)
-            if "shape_scalar_features" in scalar_normalization
-            else sampled_shape_scalar_model
-        )
-        sampled_shape = combine_shape_irreps(sampled_shape_scalar, sampled_shape_equiv).astype(np.float32)
-
-    if direct_dipole_vector:
-        sampled_dipoles = sampled_dipole_direction_state.astype(np.float32)
-        sampled_dipole_strength = dipole_strengths(sampled_dipoles).astype(np.float32)
-        sampled_dipole_direction = normalize_dipole_directions(sampled_dipoles).astype(np.float32)
-    else:
-        sampled_dipole_strength_model = state["dipole_strength"].detach().cpu().numpy().astype(np.float32)
-        sampled_dipole_strength = (
-            invert_scalar_normalization(sampled_dipole_strength_model, scalar_normalization["dipole_strength"]).astype(np.float32)
-            if "dipole_strength" in scalar_normalization
-            else sampled_dipole_strength_model
-        )
-        # Legacy coupled checkpoints can represent dipole sign via negative strength with opposite direction.
-        # Compose the signed vector first, then derive nonnegative magnitude from its norm.
-        sampled_dipole_direction_raw = _project_dipole_direction(state["dipole_direction"]).detach().cpu().numpy().astype(np.float32)
-        sampled_dipoles = (sampled_dipole_direction_raw * sampled_dipole_strength).astype(np.float32)
-        sampled_dipole_strength = dipole_strengths(sampled_dipoles).astype(np.float32)
-        sampled_dipole_direction = normalize_dipole_directions(sampled_dipoles).astype(np.float32)
-
-    decoded_library = decode_brick_signatures(sampled_shape)
+        raise ValueError(f"Unsupported shape decode mode '{shape_decode_mode}'.")
     brick_types = np.asarray(example["types"]).astype(str).copy()
     brick_rotations = np.asarray(example["rotations"], dtype=np.float32).copy()
     ligand_mask = np.asarray(example["ligand_mask"], dtype=bool).reshape(-1)
@@ -570,9 +610,8 @@ def _decode_sampled_structure(
 def _trajectory_snapshot(
     state: Dict[str, torch.Tensor],
     example: Dict[str, np.ndarray],
-    scalar_normalization: Dict[str, Dict[str, np.ndarray]],
-    direct_shape_vector: bool,
-    direct_dipole_vector: bool,
+    shape_decode_mode: str,
+    shape_decode_library: Dict[str, np.ndarray] | None,
     *,
     stage_index: int,
     stage_label: str,
@@ -584,9 +623,8 @@ def _trajectory_snapshot(
     snapshot = _decode_sampled_structure(
         state,
         example,
-        scalar_normalization,
-        direct_shape_vector=direct_shape_vector,
-        direct_dipole_vector=direct_dipole_vector,
+        shape_decode_mode=shape_decode_mode,
+        shape_decode_library=shape_decode_library,
     )
     snapshot["stage_index"] = np.asarray(stage_index, dtype=np.int64)
     snapshot["stage_label"] = np.asarray(stage_label)
@@ -773,63 +811,15 @@ def _build_model_input(
         AtomicDataDict.BATCH_KEY: batch,
         AtomicDataDict.EDGE_INDEX_KEY: edge_index,
         AtomicDataDict.T_SAMPLED_KEY: tau,
-        AtomicDataDict.SHAPE_SCALAR_FEATURES_KEY: state["shape_scalar_features"],
-        AtomicDataDict.SHAPE_EQUIV_FEATURES_KEY: state["shape_equiv_features"],
-        AtomicDataDict.DIPOLE_STRENGTH_KEY: state["dipole_strength"],
+        AtomicDataDict.SHAPE_FEATURES_KEY: state["shape_features"],
         AtomicDataDict.DIPOLE_DIRECTION_KEY: state["dipole_direction"],
         AtomicDataDict.LIGAND_MASK_KEY: ligand_mask_column.to(dtype=torch.float32),
         AtomicDataDict.POCKET_MASK_KEY: state["pocket_mask"].unsqueeze(-1).to(dtype=torch.float32),
         AtomicDataDict.ROTATIONS_KEY: rotations,
     }
-    if "shape_features" in state:
-        payload[AtomicDataDict.SHAPE_FEATURES_KEY] = state["shape_features"]
     if sequence_position is not None:
         payload["sequence_position"] = sequence_position
     return payload
-
-
-def _apply_state_projection(
-    next_states: Dict[str, torch.Tensor],
-    *,
-    project_normalized_states: bool,
-) -> Dict[str, torch.Tensor]:
-    projected = dict(next_states)
-    if project_normalized_states:
-        projected["shape_equiv_features"] = _project_shape_equiv(projected["shape_equiv_features"])
-        projected["dipole_direction"] = _project_dipole_direction(projected["dipole_direction"])
-    return projected
-
-
-def _compose_directional_velocity_outputs(
-    output: Dict[str, torch.Tensor],
-    couplings: Sequence[Dict[str, Any]],
-) -> Dict[str, torch.Tensor]:
-    if len(couplings) == 0:
-        return output
-    composed = dict(output)
-    for coupling in couplings:
-        scalar_out_field = str(coupling["scalar_out_field"])
-        equiv_out_field = str(coupling["equiv_out_field"])
-        if scalar_out_field not in composed or equiv_out_field not in composed:
-            continue
-        scalar_values = composed[scalar_out_field]
-        equiv_values = composed[equiv_out_field]
-        updated_equiv = equiv_values.clone()
-        scalar_indices = coupling["scalar_indices"]
-        equiv_starts = coupling["equiv_starts"]
-        equiv_stops = coupling["equiv_stops"]
-        nonnegative_scale = bool(coupling.get("nonnegative_scale", True))
-        for block_idx in range(len(scalar_indices)):
-            scalar_index = int(scalar_indices[block_idx])
-            start = int(equiv_starts[block_idx])
-            stop = int(equiv_stops[block_idx])
-            direction = equiv_values[..., start:stop]
-            scale = scalar_values[..., scalar_index : scalar_index + 1]
-            if nonnegative_scale:
-                scale = torch.clamp(scale, min=0.0)
-            updated_equiv[..., start:stop] = direction * scale
-        composed[equiv_out_field] = updated_equiv
-    return composed
 
 
 def _merge_ligand_updates(
@@ -838,47 +828,15 @@ def _merge_ligand_updates(
 ) -> Dict[str, torch.Tensor]:
     ligand_mask_column = state["ligand_mask"].unsqueeze(-1)
     merged = dict(state)
-    shape_features_fixed = state.get("shape_features_fixed")
-    shape_scalar_fixed = state.get("shape_scalar_features_fixed", state.get("shape_scalar_fixed"))
-    shape_equiv_fixed = state.get("shape_equiv_features_fixed", state.get("shape_equiv_fixed"))
-    if "shape_features" in state and shape_features_fixed is None:
-        raise KeyError("Missing fixed state for shape_features.")
-    if shape_scalar_fixed is None:
-        raise KeyError("Missing fixed state for shape_scalar_features.")
-    if shape_equiv_fixed is None:
-        raise KeyError("Missing fixed state for shape_equiv_features.")
     merged["pos"] = torch.where(ligand_mask_column, next_states["pos"], state["pos_fixed"])
-    if "shape_features" in state:
-        merged["shape_features"] = torch.where(ligand_mask_column, next_states["shape_features"], shape_features_fixed)
-    merged["shape_scalar_features"] = torch.where(ligand_mask_column, next_states["shape_scalar_features"], shape_scalar_fixed)
-    merged["shape_equiv_features"] = torch.where(ligand_mask_column, next_states["shape_equiv_features"], shape_equiv_fixed)
-    merged["dipole_strength"] = torch.where(ligand_mask_column, next_states["dipole_strength"], state["dipole_strength_fixed"])
-    merged["dipole_direction"] = torch.where(ligand_mask_column, next_states["dipole_direction"], state["dipole_direction_fixed"])
+    for field_name in ("shape_features", "dipole_direction"):
+        if field_name not in state or field_name not in next_states:
+            continue
+        fixed_key = "pos_fixed" if field_name == "pos" else f"{field_name}_fixed"
+        if fixed_key not in state:
+            raise KeyError(f"Missing fixed state for {field_name}.")
+        merged[field_name] = torch.where(ligand_mask_column, next_states[field_name], state[fixed_key])
     return merged
-
-
-def _normalize_feature_rows_torch(values: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    if values.numel() == 0:
-        return values
-    norms = torch.linalg.norm(values, dim=-1, keepdim=True)
-    safe = torch.clamp(norms, min=eps)
-    normalized = values / safe
-    return torch.where(norms > eps, normalized, torch.zeros_like(values))
-
-
-def _combine_shape_irreps_torch(
-    shape_scalars: torch.Tensor,
-    shape_equivariants: torch.Tensor,
-) -> torch.Tensor:
-    l0 = shape_scalars[..., 0:1]
-    l1_mag = torch.clamp(shape_scalars[..., 1:2], min=0.0)
-    l2_mag = torch.clamp(shape_scalars[..., 2:3], min=0.0)
-    l3_mag = torch.clamp(shape_scalars[..., 3:4], min=0.0)
-
-    l1_dir = _normalize_feature_rows_torch(shape_equivariants[..., 0:3])
-    l2_dir = _normalize_feature_rows_torch(shape_equivariants[..., 3:8])
-    l3_dir = _normalize_feature_rows_torch(shape_equivariants[..., 8:15])
-    return torch.cat([l0, l1_dir * l1_mag, l2_dir * l2_mag, l3_dir * l3_mag], dim=-1)
 
 
 def _support_sample_directions(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -914,7 +872,8 @@ def _support_sample_directions(device: torch.device, dtype: torch.dtype) -> torc
         device=device,
         dtype=dtype,
     )
-    return _normalize_feature_rows_torch(directions)
+    norms = torch.linalg.norm(directions, dim=-1, keepdim=True)
+    return directions / torch.clamp(norms, min=1e-8)
 
 
 def _directional_extent(
@@ -1043,16 +1002,6 @@ def _apply_clash_guidance(
                 state["shape_features"].detach().to(dtype=torch.float32)
                 - tau_value * output["shape_features_velocity"].detach().to(dtype=torch.float32)
             ).detach()
-        elif all(field in output for field in ("shape_scalar_velocity", "shape_equiv_velocity")):
-            pred_shape_scalar = (
-                state["shape_scalar_features"].detach().to(dtype=torch.float32)
-                - tau_value * output["shape_scalar_velocity"].detach().to(dtype=torch.float32)
-            )
-            pred_shape_equiv = (
-                state["shape_equiv_features"].detach().to(dtype=torch.float32)
-                - tau_value * output["shape_equiv_velocity"].detach().to(dtype=torch.float32)
-            )
-            pred_shape_coeffs = _combine_shape_irreps_torch(pred_shape_scalar, pred_shape_equiv).detach()
         else:
             return output
         clash_energy = _shape_aware_clash_energy(
@@ -1119,14 +1068,10 @@ def _euler_candidate_states(
     corrupt_field_map: Dict[str, str],
 ) -> Dict[str, torch.Tensor]:
     dtau = sampler.dtau_from_values(x_t=state["pos"], tau_t=tau_t, tau_prev=tau_prev)
-    next_states = {
-        "pos": state["pos"],
-        "shape_features": state["shape_features"],
-        "shape_scalar_features": state["shape_scalar_features"],
-        "shape_equiv_features": state["shape_equiv_features"],
-        "dipole_strength": state["dipole_strength"],
-        "dipole_direction": state["dipole_direction"],
-    }
+    next_states = {"pos": state["pos"]}
+    for field_name in ("shape_features", "dipole_direction"):
+        if field_name in state:
+            next_states[field_name] = state[field_name]
     for field_name, out_field in STATE_FIELD_SPECS:
         if field_name not in corrupt_field_map:
             continue
@@ -1148,13 +1093,10 @@ def sample_example(
     device: torch.device,
     seed: int,
     start_scheduler_step: int,
-    scalar_normalization: Dict[str, Dict[str, np.ndarray]],
-    direct_shape_vector: bool,
-    direct_dipole_vector: bool,
-    project_normalized_states: bool,
+    shape_decode_mode: str,
+    shape_decode_library: Dict[str, np.ndarray] | None,
     corrupt_field_map: Dict[str, str],
     corrupt_field_settings: Dict[str, Dict[str, Any]],
-    directional_velocity_couplings: Sequence[Dict[str, Any]],
     save_intermediates: bool,
     save_velocity_vectors: bool,
     sampler_name: str,
@@ -1211,9 +1153,8 @@ def sample_example(
             _trajectory_snapshot(
                 state,
                 example,
-                scalar_normalization,
-                direct_shape_vector=direct_shape_vector,
-                direct_dipole_vector=direct_dipole_vector,
+                shape_decode_mode=shape_decode_mode,
+                shape_decode_library=shape_decode_library,
                 stage_index=0,
                 stage_label="noise",
                 scheduler_step=int(initial_stage["scheduler_step"]),
@@ -1236,10 +1177,7 @@ def sample_example(
             r_max=r_max,
             device=device,
         )
-        raw_output = _compose_directional_velocity_outputs(
-            model(batch_input),
-            couplings=directional_velocity_couplings,
-        )
+        raw_output = model(batch_input)
         output = _apply_clash_guidance(
             raw_output,
             state,
@@ -1264,10 +1202,7 @@ def sample_example(
         if sampler_name == "heun" and tau_next_value < tau_value - 1e-12:
             provisional_state = _merge_ligand_updates(
                 state,
-                _apply_state_projection(
-                    euler_states,
-                    project_normalized_states=project_normalized_states,
-                ),
+                euler_states,
             )
             batch_input_next = _build_model_input(
                 provisional_state,
@@ -1279,10 +1214,7 @@ def sample_example(
                 r_max=r_max,
                 device=device,
             )
-            raw_output_next = _compose_directional_velocity_outputs(
-                model(batch_input_next),
-                couplings=directional_velocity_couplings,
-            )
+            raw_output_next = model(batch_input_next)
             output_next = _apply_clash_guidance(
                 raw_output_next,
                 provisional_state,
@@ -1295,14 +1227,10 @@ def sample_example(
                 guidance_auto_scale_min=clash_guidance_auto_scale_min,
                 guidance_auto_scale_max=clash_guidance_auto_scale_max,
             )
-            next_states = {
-                "pos": state["pos"],
-                "shape_features": state["shape_features"],
-                "shape_scalar_features": state["shape_scalar_features"],
-                "shape_equiv_features": state["shape_equiv_features"],
-                "dipole_strength": state["dipole_strength"],
-                "dipole_direction": state["dipole_direction"],
-            }
+            next_states = {"pos": state["pos"]}
+            for field_name in ("shape_features", "dipole_direction"):
+                if field_name in state:
+                    next_states[field_name] = state[field_name]
             for field_name, out_field in STATE_FIELD_SPECS:
                 if field_name not in corrupt_field_map:
                     continue
@@ -1320,13 +1248,7 @@ def sample_example(
         else:
             next_states = euler_states
 
-        state = _merge_ligand_updates(
-            state,
-            _apply_state_projection(
-                next_states,
-                project_normalized_states=project_normalized_states,
-            ),
-        )
+        state = _merge_ligand_updates(state, next_states)
         if save_intermediates:
             velocity_vectors = None
             velocity_raw_vectors = None
@@ -1360,9 +1282,8 @@ def sample_example(
                 _trajectory_snapshot(
                     state,
                     example,
-                    scalar_normalization,
-                    direct_shape_vector=direct_shape_vector,
-                    direct_dipole_vector=direct_dipole_vector,
+                    shape_decode_mode=shape_decode_mode,
+                    shape_decode_library=shape_decode_library,
                     stage_index=step_idx + 1,
                     stage_label=stage_label,
                     scheduler_step=scheduler_step,
@@ -1375,30 +1296,23 @@ def sample_example(
     decoded_sample = _decode_sampled_structure(
         state,
         example,
-        scalar_normalization,
-        direct_shape_vector=direct_shape_vector,
-        direct_dipole_vector=direct_dipole_vector,
+        shape_decode_mode=shape_decode_mode,
+        shape_decode_library=shape_decode_library,
     )
 
     original_shape = np.asarray(
-        example.get("shape_features_raw", combine_shape_irreps(example["shape_scalar_features"], example["shape_equiv_features"])),
+        example.get("shape_features_raw", example["shape_features"]),
         dtype=np.float32,
     )
     original_dipoles = np.asarray(
-        example.get("brick_dipoles_raw", example["dipole_direction"] * example["dipole_strength"]),
+        example.get(
+            "brick_dipoles_raw",
+            example["dipole_direction"],
+        ),
         dtype=np.float32,
     )
-    if direct_dipole_vector:
-        original_dipole_strength = dipole_strengths(original_dipoles).astype(np.float32)
-        original_dipole_direction = normalize_dipole_directions(original_dipoles).astype(np.float32)
-    else:
-        original_dipole_strength = np.asarray(
-            example.get("dipole_strength_raw", example["dipole_strength"]),
-            dtype=np.float32,
-        )
-        original_dipole_direction = normalize_dipole_directions(
-            np.asarray(example.get("dipole_direction_raw", example["dipole_direction"]), dtype=np.float32)
-        ).astype(np.float32)
+    original_dipole_strength = dipole_strengths(original_dipoles).astype(np.float32)
+    original_dipole_direction = normalize_dipole_directions(original_dipoles).astype(np.float32)
 
     sample = {
         **decoded_sample,
@@ -1429,6 +1343,7 @@ def sample_example(
         "sampling_clash_guidance_auto_scale": np.asarray(bool(clash_guidance_auto_scale)),
         "sampling_clash_guidance_auto_scale_min": np.asarray(float(clash_guidance_auto_scale_min), dtype=np.float32),
         "sampling_clash_guidance_auto_scale_max": np.asarray(float(clash_guidance_auto_scale_max), dtype=np.float32),
+        "sampling_shape_decode_mode": np.asarray(str(shape_decode_mode)),
     }
     if save_intermediates:
         sample["intermediate_states"] = np.asarray(trajectory, dtype=object)
@@ -1469,12 +1384,8 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     model, config, _ = CheckpointHandler.load_model(str(args.model), device=args.device)
     validate_flow_checkpoint_config(config)
-    direct_shape_vector = infer_direct_shape_vector(config)
-    direct_dipole_vector = infer_direct_dipole_vector(config)
-    project_normalized_states = bool(args.project_normalized_states)
     corrupt_field_settings = infer_corrupt_field_settings(config)
     corrupt_field_map = infer_corrupt_field_map(config)
-    directional_velocity_couplings = infer_directional_velocity_couplings(config)
 
     try:
         r_max = float(config[AtomicDataDict.R_MAX_KEY])
@@ -1501,7 +1412,22 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     with np.load(args.input, allow_pickle=True) as raw:
         data = {key: raw[key] for key in raw.files}
-    scalar_normalization = extract_scalar_normalization(data)
+
+    requested_decode_mode = str(args.shape_decode_mode).strip().lower()
+    shape_decode_library = None
+    if requested_decode_mode == "input_knn":
+        shape_decode_mode = "input_knn"
+        shape_decode_library = _build_input_knn_decode_library(
+            data,
+            max_candidates=int(args.shape_decode_max_candidates),
+            seed=int(args.seed),
+        )
+        print(f"Shape decode mode: input_knn (candidates={int(shape_decode_library['features'].shape[0])}).")
+    elif requested_decode_mode == "keep_original":
+        shape_decode_mode = requested_decode_mode
+        print(f"Shape decode mode: {shape_decode_mode}.")
+    else:
+        raise ValueError(f"Unsupported --shape-decode-mode: {requested_decode_mode}")
 
     source_samples = load_samples(args.source_canonical) if args.source_canonical is not None else None
     selected_indices = choose_example_indices(args, num_examples=int(np.asarray(data["num_nodes"]).shape[0]))
@@ -1518,13 +1444,10 @@ def main(args: argparse.Namespace | None = None) -> None:
             device=torch.device(args.device),
             seed=args.seed + output_index,
             start_scheduler_step=start_scheduler_step,
-            scalar_normalization=scalar_normalization,
-            direct_shape_vector=direct_shape_vector,
-            direct_dipole_vector=direct_dipole_vector,
-            project_normalized_states=project_normalized_states,
+            shape_decode_mode=shape_decode_mode,
+            shape_decode_library=shape_decode_library,
             corrupt_field_map=corrupt_field_map,
             corrupt_field_settings=corrupt_field_settings,
-            directional_velocity_couplings=directional_velocity_couplings,
             save_intermediates=bool(args.save_intermediates),
             save_velocity_vectors=bool(args.save_velocity_vectors),
             sampler_name=str(args.sampler),
