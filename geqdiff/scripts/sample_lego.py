@@ -20,13 +20,9 @@ if str(REPO_ROOT) not in sys.path:
 from geqdiff.data import AtomicDataDict
 from geqdiff.utils import FlowMatchingHeunSampler, FlowMatchingSampler, FlowMatchingScheduler
 from geqdiff.utils.diffusion import center_pos, compute_reference_mean
-from geqdiff.utils.dipole_utils import (
-    dipole_strengths,
-    normalize_dipole_directions,
-)
 from geqdiff.scripts.evaluate_lego_samples import build_evaluation_report
 from geqtrain.train.components.checkpointing import CheckpointHandler
-from lego.utils import load_samples, save_samples
+from lego.utils import load_samples, save_samples, voxelize_anchors
 
 
 STATE_FIELD_SPECS = (
@@ -572,8 +568,6 @@ def _decode_sampled_structure(
     sampled_pos = (state["pos"] + state["centroid"]).detach().cpu().numpy().astype(np.float32)
     sampled_shape = state["shape_features"].detach().cpu().numpy().astype(np.float32)
     sampled_dipoles = state["dipole_direction"].detach().cpu().numpy().astype(np.float32)
-    sampled_dipole_strength = dipole_strengths(sampled_dipoles).astype(np.float32)
-    sampled_dipole_direction = normalize_dipole_directions(sampled_dipoles).astype(np.float32)
 
     mode = str(shape_decode_mode).strip().lower()
     if mode == "input_knn":
@@ -600,8 +594,6 @@ def _decode_sampled_structure(
         "brick_rotations": brick_rotations,
         "brick_features": sampled_shape,
         "brick_dipoles": sampled_dipoles,
-        "brick_dipole_strengths": sampled_dipole_strength,
-        "brick_dipole_directions": sampled_dipole_direction,
         "decoded_library_index": np.asarray(decoded_library["indices"], dtype=np.int64),
         "decoded_library_distance": np.asarray(decoded_library["distances"], dtype=np.float32),
     }
@@ -626,6 +618,13 @@ def _trajectory_snapshot(
         shape_decode_mode=shape_decode_mode,
         shape_decode_library=shape_decode_library,
     )
+    anchors_raw = np.asarray(snapshot["brick_anchors"], dtype=np.float32)
+    anchors_voxelized = voxelize_anchors(anchors_raw)
+    snapshot["brick_anchors_raw"] = anchors_raw
+    snapshot["brick_anchors_voxelized"] = anchors_voxelized
+    snapshot["brick_anchors"] = anchors_voxelized
+    snapshot["pos_raw"] = anchors_raw
+    snapshot["pos"] = anchors_voxelized
     snapshot["stage_index"] = np.asarray(stage_index, dtype=np.int64)
     snapshot["stage_label"] = np.asarray(stage_label)
     snapshot["scheduler_step"] = np.asarray(scheduler_step, dtype=np.int64)
@@ -1299,6 +1298,14 @@ def sample_example(
         shape_decode_mode=shape_decode_mode,
         shape_decode_library=shape_decode_library,
     )
+    sampled_anchors_raw = np.asarray(decoded_sample["brick_anchors"], dtype=np.float32)
+    sampled_anchors_voxelized = voxelize_anchors(sampled_anchors_raw)
+    decoded_sample = dict(decoded_sample)
+    decoded_sample["brick_anchors_raw"] = sampled_anchors_raw
+    decoded_sample["brick_anchors_voxelized"] = sampled_anchors_voxelized
+    decoded_sample["brick_anchors"] = sampled_anchors_voxelized
+    decoded_sample["pos_raw"] = sampled_anchors_raw
+    decoded_sample["pos"] = sampled_anchors_voxelized
 
     original_shape = np.asarray(
         example.get("shape_features_raw", example["shape_features"]),
@@ -1311,9 +1318,6 @@ def sample_example(
         ),
         dtype=np.float32,
     )
-    original_dipole_strength = dipole_strengths(original_dipoles).astype(np.float32)
-    original_dipole_direction = normalize_dipole_directions(original_dipoles).astype(np.float32)
-
     sample = {
         **decoded_sample,
         "original_brick_anchors": np.asarray(example["pos"], dtype=np.float32),
@@ -1321,8 +1325,6 @@ def sample_example(
         "original_brick_rotations": np.asarray(example["rotations"], dtype=np.float32),
         "original_brick_features": original_shape,
         "original_brick_dipoles": original_dipoles,
-        "original_brick_dipole_strengths": original_dipole_strength,
-        "original_brick_dipole_directions": original_dipole_direction,
         "sampled_brick_mask": np.asarray(example["ligand_mask"], dtype=bool),
         "ligand_mask": np.asarray(example["ligand_mask"], dtype=bool),
         "pocket_mask": np.asarray(example["pocket_mask"], dtype=bool),

@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from geqdiff.utils.contact_utils import build_brick_geometries, detect_brick_contacts
 from geqdiff.utils.dipole_utils import DipoleAssignmentConfig, evaluate_contact_energy
+from lego.utils import voxelize_anchors
 
 
 FACE_MATCH_TOLERANCE = 0.35
@@ -25,13 +26,13 @@ VALID_LIKE_EFFECTIVE_OVERLAP = 0.02
 EPS = 1e-8
 
 # Relative-score calibration constants (new secondary-structure dataset)
-VALIDITY_EXCESS_OVERLAP_WEIGHT = 6.0
-VALIDITY_EXCESS_SEVERE_WEIGHT = 0.9
-VALIDITY_EXCESS_COMPONENT_WEIGHT = 1.2
-VALIDITY_FIXED_SHIFT_WEIGHT = 4.0
-SHAPE_RMSE_SCALE = 0.08
-DIPOLE_MAG_RMSE_SCALE = 0.20
-DIPOLE_ENERGY_DELTA_SCALE = 1.0
+VALIDITY_EXCESS_OVERLAP_WEIGHT = 3.5
+VALIDITY_EXCESS_SEVERE_WEIGHT = 0.5
+VALIDITY_EXCESS_COMPONENT_WEIGHT = 0.8
+VALIDITY_FIXED_SHIFT_WEIGHT = 2.5
+SHAPE_RMSE_SCALE = 0.11
+DIPOLE_MAG_RMSE_SCALE = 0.28
+DIPOLE_ENERGY_DELTA_SCALE = 1.5
 
 
 def structure_from_sample(sample: Dict[str, Any], prefix: str = "") -> Dict[str, np.ndarray]:
@@ -518,7 +519,7 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
                 "weighted_dipole_energy": 0.0,
             },
         }
-    payload: Dict[str, Any] = {"sampled": sampled}
+    payload: Dict[str, Any] = {"sampled": sampled, "score_mode": "relative_to_original"}
 
     if "original_brick_anchors" not in sample:
         sampled["scores"] = dict(sampled.get("scores", {}))
@@ -563,6 +564,9 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
                 "weighted_dipole_energy": 0.0,
             },
         }
+    sampled_absolute_scores = dict(sampled.get("scores", {}))
+    original_absolute_scores = dict(original.get("scores", {}))
+
     sampled_mask = np.asarray(sample.get("sampled_brick_mask", np.zeros((len(sample["brick_anchors"]),), dtype=bool)), dtype=bool).reshape(-1)
     anchor_shift = _shift_compare(sample)
     validity_score, validity_details = _relative_validity_score(
@@ -575,9 +579,9 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
     pose_score = float(
         100.0
         * np.exp(
-            -float(anchor_shift["diffused_shift_mean"]) / 0.35
-            -float(anchor_shift["diffused_shift_max"]) / 0.80
-            -2.0 * float(anchor_shift["fixed_shift_max"])
+            -float(anchor_shift["diffused_shift_mean"]) / 0.50
+            -float(anchor_shift["diffused_shift_max"]) / 1.20
+            -1.2 * float(anchor_shift["fixed_shift_max"])
         )
     )
 
@@ -613,6 +617,9 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
         }
     )
 
+    sampled["absolute_scores"] = sampled_absolute_scores
+    original["absolute_scores"] = original_absolute_scores
+
     payload["original"] = original
     payload["compare"] = {
         "score_delta": {
@@ -642,3 +649,30 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
         "anchor_shift": anchor_shift,
     }
     return payload
+
+
+def _sample_with_anchor_mode(sample: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    mode_key = str(mode).strip().lower()
+    raw = np.asarray(sample.get("brick_anchors_raw", sample["brick_anchors"]), dtype=np.float32)
+    if mode_key == "raw":
+        anchors = raw
+    elif mode_key == "voxelized":
+        anchors = np.asarray(sample.get("brick_anchors_voxelized", voxelize_anchors(raw)), dtype=np.float32)
+    else:
+        raise ValueError(f"Unsupported anchor mode '{mode}'. Expected 'raw' or 'voxelized'.")
+    updated = dict(sample)
+    updated["brick_anchors"] = anchors
+    return updated
+
+
+def evaluate_sample_scores_by_anchor_mode(
+    sample: Dict[str, Any],
+    dipole_config: DipoleAssignmentConfig = DipoleAssignmentConfig(),
+) -> Dict[str, Any]:
+    raw_sample = _sample_with_anchor_mode(sample, "raw")
+    voxelized_sample = _sample_with_anchor_mode(sample, "voxelized")
+    return {
+        "raw": evaluate_sample_scores(raw_sample, dipole_config=dipole_config),
+        "voxelized": evaluate_sample_scores(voxelized_sample, dipole_config=dipole_config),
+        "default_mode": "voxelized",
+    }

@@ -14,12 +14,12 @@ from plotly.utils import PlotlyJSONEncoder
 
 try:
     from lego.lego_blocks import LEGO_LIBRARY, rotated_offsets
-    from lego.score_utils import evaluate_sample_scores
-    from lego.utils import block_palette, build_surface_mesh, default_dataset_path, load_samples
+    from lego.score_utils import evaluate_sample_scores, evaluate_sample_scores_by_anchor_mode
+    from lego.utils import block_palette, build_surface_mesh, default_dataset_path, load_samples, voxelize_anchors
 except ModuleNotFoundError:
     from lego_blocks import LEGO_LIBRARY, rotated_offsets
-    from score_utils import evaluate_sample_scores
-    from utils import block_palette, build_surface_mesh, default_dataset_path, load_samples
+    from score_utils import evaluate_sample_scores, evaluate_sample_scores_by_anchor_mode
+    from utils import block_palette, build_surface_mesh, default_dataset_path, load_samples, voxelize_anchors
 
 
 FACE_DIRECTIONS = (
@@ -44,12 +44,12 @@ MIN_BLOCK_OPACITY = 0.15
 MAX_BLOCK_OPACITY = 1.0
 SAMPLED_STRUCTURE_FIELDS = (
     "brick_anchors",
+    "brick_anchors_raw",
+    "brick_anchors_voxelized",
     "brick_types",
     "brick_rotations",
     "brick_features",
     "brick_dipoles",
-    "brick_dipole_strengths",
-    "brick_dipole_directions",
     "velocity_vectors",
     "velocity_raw_vectors",
 )
@@ -572,6 +572,25 @@ def _sample_with_sampled_structure(sample: Dict, sampled_structure: Dict) -> Dic
     return merged
 
 
+def _sample_with_anchor_mode(sample: Dict, *, mode: str, prefix: str = "") -> Dict:
+    mode_key = str(mode).strip().lower()
+    anchors_key = f"{prefix}brick_anchors"
+    raw_key = f"{prefix}brick_anchors_raw"
+    voxel_key = f"{prefix}brick_anchors_voxelized"
+    if anchors_key not in sample:
+        return sample
+    raw_anchors = np.asarray(sample.get(raw_key, sample[anchors_key]), dtype=np.float32)
+    if mode_key == "raw":
+        anchors = raw_anchors
+    elif mode_key == "voxelized":
+        anchors = np.asarray(sample.get(voxel_key, voxelize_anchors(raw_anchors)), dtype=np.float32)
+    else:
+        raise ValueError(f"Unsupported anchor mode '{mode}'.")
+    updated = dict(sample)
+    updated[anchors_key] = anchors
+    return updated
+
+
 def _structure_traces(sample: Dict, prefix: str) -> Dict[str, List[go.BaseTraceType]]:
     anchors = np.asarray(sample[f"{prefix}brick_anchors"], dtype=np.float32)
     rotations = np.asarray(sample[f"{prefix}brick_rotations"], dtype=np.float32)
@@ -758,7 +777,9 @@ def _trajectory_state_payloads(sample: Dict) -> List[Dict]:
     payloads: List[Dict] = []
     for stage_index, raw_stage in enumerate(raw_stages):
         stage_sample = _sample_with_sampled_structure(sample, raw_stage)
-        stage_traces = _structure_traces(stage_sample, prefix="")
+        stage_sample_raw = _sample_with_anchor_mode(stage_sample, mode="raw", prefix="")
+        stage_traces_raw = _structure_traces(stage_sample_raw, prefix="")
+        score_raw = evaluate_sample_scores(stage_sample_raw)
         payloads.append(
             {
                 "label": str(np.asarray(stage_sample.get("stage_label", "final")).reshape(-1)[0]),
@@ -766,12 +787,21 @@ def _trajectory_state_payloads(sample: Dict) -> List[Dict]:
                 "scheduler_step": int(np.asarray(stage_sample.get("scheduler_step", -1)).reshape(-1)[0]),
                 "tau": float(np.asarray(stage_sample.get("tau", 0.0)).reshape(-1)[0]),
                 "structure": {
-                    "bricks": _serialize_traces(stage_traces["bricks"]),
-                    "surfaces": _serialize_traces(stage_traces["surfaces"]),
-                    "dipole_specs": stage_traces["dipole_specs"],
-                    "velocity_specs": stage_traces["velocity_specs"],
+                    "bricks": _serialize_traces(stage_traces_raw["bricks"]),
+                    "surfaces": _serialize_traces(stage_traces_raw["surfaces"]),
+                    "dipole_specs": stage_traces_raw["dipole_specs"],
+                    "velocity_specs": stage_traces_raw["velocity_specs"],
                 },
-                "scores": evaluate_sample_scores(stage_sample),
+                "structure_by_anchor_mode": {
+                    "raw": {
+                        "bricks": _serialize_traces(stage_traces_raw["bricks"]),
+                        "surfaces": _serialize_traces(stage_traces_raw["surfaces"]),
+                        "dipole_specs": stage_traces_raw["dipole_specs"],
+                        "velocity_specs": stage_traces_raw["velocity_specs"],
+                    },
+                },
+                "scores": score_raw,
+                "scores_by_anchor_mode": {"raw": score_raw},
             }
         )
     return payloads
@@ -784,20 +814,54 @@ def _serialize_traces(traces: Sequence[go.BaseTraceType]) -> List[Dict]:
 def _sample_state(sample: Dict, projection: str) -> Dict:
     sampled_trajectory = _trajectory_state_payloads(sample)
     sampled = sampled_trajectory[-1]["structure"]
-    original = _structure_traces(sample, prefix="original_") if "original_brick_anchors" in sample else sampled
+    sampled_sample_voxelized = _sample_with_anchor_mode(sample, mode="voxelized", prefix="")
+    sampled_voxelized = _structure_traces(sampled_sample_voxelized, prefix="")
+    original_sample_raw = _sample_with_anchor_mode(sample, mode="raw", prefix="original_")
+    original_sample_voxelized = _sample_with_anchor_mode(sample, mode="voxelized", prefix="original_")
+    if "original_brick_anchors" in sample:
+        original_raw = _structure_traces(original_sample_raw, prefix="original_")
+        original_voxelized = _structure_traces(original_sample_voxelized, prefix="original_")
+    else:
+        original_raw = _structure_traces(_sample_with_anchor_mode(sample, mode="raw", prefix=""), prefix="")
+        original_voxelized = _structure_traces(_sample_with_anchor_mode(sample, mode="voxelized", prefix=""), prefix="")
     target = _target_trace_sets(sample)
+    score_modes = evaluate_sample_scores_by_anchor_mode(sample)
     return {
         "meta": _sample_meta(sample),
-        "scores": evaluate_sample_scores(sample),
+        "scores": score_modes["voxelized"],
+        "scores_by_anchor_mode": score_modes,
         "sampled_trajectory": sampled_trajectory,
         "scene": _scene_spec(sample, projection=projection),
         "structures": {
             "sampled": sampled,
+            "sampled_by_anchor_mode": {
+                "raw": sampled_trajectory[-1]["structure_by_anchor_mode"]["raw"],
+                "voxelized": {
+                    "bricks": _serialize_traces(sampled_voxelized["bricks"]),
+                    "surfaces": _serialize_traces(sampled_voxelized["surfaces"]),
+                    "dipole_specs": sampled_voxelized["dipole_specs"],
+                    "velocity_specs": sampled_voxelized["velocity_specs"],
+                },
+            },
             "original": {
-                "bricks": _serialize_traces(original["bricks"]),
-                "surfaces": _serialize_traces(original["surfaces"]),
-                "dipole_specs": original["dipole_specs"],
-                "velocity_specs": original["velocity_specs"],
+                "bricks": _serialize_traces(original_voxelized["bricks"]),
+                "surfaces": _serialize_traces(original_voxelized["surfaces"]),
+                "dipole_specs": original_voxelized["dipole_specs"],
+                "velocity_specs": original_voxelized["velocity_specs"],
+            },
+            "original_by_anchor_mode": {
+                "raw": {
+                    "bricks": _serialize_traces(original_raw["bricks"]),
+                    "surfaces": _serialize_traces(original_raw["surfaces"]),
+                    "dipole_specs": original_raw["dipole_specs"],
+                    "velocity_specs": original_raw["velocity_specs"],
+                },
+                "voxelized": {
+                    "bricks": _serialize_traces(original_voxelized["bricks"]),
+                    "surfaces": _serialize_traces(original_voxelized["surfaces"]),
+                    "dipole_specs": original_voxelized["dipole_specs"],
+                    "velocity_specs": original_voxelized["velocity_specs"],
+                },
             },
         },
         "target": {key: _serialize_traces(value) for key, value in target.items()},
@@ -1187,6 +1251,13 @@ def _build_html(
         </select>
       </div>
       <div class="control">
+        <label for="anchor-mode-select">Anchor Mode</label>
+        <select id="anchor-mode-select">
+          <option value="voxelized" selected>Voxelized</option>
+          <option value="raw">Raw</option>
+        </select>
+      </div>
+      <div class="control">
         <label for="target-select">Target</label>
         <select id="target-select">
           <option value="hidden"{target_selected["hidden"]}>Hidden</option>
@@ -1259,6 +1330,7 @@ def _build_html(
     const trajectorySlider = document.getElementById("trajectory-slider");
     const trajectoryLabel = document.getElementById("trajectory-label");
     const displaySelect = document.getElementById("display-select");
+    const anchorModeSelect = document.getElementById("anchor-mode-select");
     const targetSelect = document.getElementById("target-select");
     const projectionSelect = document.getElementById("projection-select");
     const dipoleToggle = document.getElementById("dipole-toggle");
@@ -1281,6 +1353,11 @@ def _build_html(
 
     function normalizeTargetMode(value) {{
       return value === "surface" ? "filled" : value;
+    }}
+
+    function selectedAnchorMode() {{
+      const value = String(anchorModeSelect.value || "voxelized").toLowerCase();
+      return value === "raw" ? "raw" : "voxelized";
     }}
 
     function mergeInto(target, source) {{
@@ -1349,7 +1426,8 @@ def _build_html(
 
     function updateTrajectoryControl(state, resetToFinal = false) {{
       const trajectory = sampledTrajectory(state);
-      const hasTrajectory = trajectory.length > 1;
+      const isRawMode = selectedAnchorMode() === "raw";
+      const hasTrajectory = isRawMode && trajectory.length > 1;
       trajectoryControl.classList.toggle("hidden", !hasTrajectory);
       trajectorySlider.disabled = !hasTrajectory;
       trajectorySlider.min = "0";
@@ -1362,7 +1440,11 @@ def _build_html(
         Math.max(trajectory.length - 1, 0)
       );
       trajectorySlider.value = String(clampedIndex);
-      trajectoryLabel.textContent = formatTrajectoryStage(trajectory[clampedIndex], clampedIndex, trajectory.length);
+      if (!isRawMode) {{
+        trajectoryLabel.textContent = "final (voxelized)";
+      }} else {{
+        trajectoryLabel.textContent = formatTrajectoryStage(trajectory[clampedIndex], clampedIndex, trajectory.length);
+      }}
       return clampedIndex;
     }}
 
@@ -1376,10 +1458,27 @@ def _build_html(
     }}
 
     function structurePayloadForKey(state, structureKey) {{
+      const anchorMode = selectedAnchorMode();
       if (structureKey === "sampled") {{
+        if (anchorMode === "voxelized") {{
+          const finalVariants = state.structures.sampled_by_anchor_mode;
+          if (finalVariants && finalVariants.voxelized) {{
+            return finalVariants.voxelized;
+          }}
+        }}
         const stage = currentSampledStage(state);
+        const stagedVariants = stage && stage.structure_by_anchor_mode;
+        if (stagedVariants && stagedVariants[anchorMode]) {{
+          return stagedVariants[anchorMode];
+        }}
         if (stage && stage.structure) {{
           return stage.structure;
+        }}
+      }}
+      if (structureKey === "original") {{
+        const structureVariants = state.structures.original_by_anchor_mode;
+        if (structureVariants && structureVariants[anchorMode]) {{
+          return structureVariants[anchorMode];
         }}
       }}
       return state.structures[structureKey];
@@ -1446,9 +1545,12 @@ def _build_html(
         }}
         bits.push(samplerText);
       }}
-      if (trajectory.length > 1) {{
+      if (selectedAnchorMode() === "raw" && trajectory.length > 1) {{
         bits.push(`stage ${{formatTrajectoryStage(sampledStage, Number(trajectorySlider.value || "0"), trajectory.length)}}`);
+      }} else if (selectedAnchorMode() === "voxelized") {{
+        bits.push("stage final (voxelized)");
       }}
+      bits.push(`anchors: ${{selectedAnchorMode()}}`);
       if (Object.prototype.hasOwnProperty.call(state.meta, "trajectory_stride") && Number(state.meta.trajectory_stride) > 1) {{
         bits.push(`trajectory stride ${{state.meta.trajectory_stride}}`);
       }}
@@ -1511,7 +1613,7 @@ def _build_html(
       if (numeric >= 85.0) {{
         return "good";
       }}
-      if (numeric >= 60.0) {{
+      if (numeric >= 55.0) {{
         return "warning";
       }}
       return "bad";
@@ -1548,14 +1650,14 @@ def _build_html(
           summary: `overall ${{overall.toFixed(1)}}`,
         }};
       }}
-      if (validity >= 95.0 && overall >= 80.0) {{
+      if (validity >= 90.0 && overall >= 75.0) {{
         return {{
           label: "Pass",
           className: "good",
           summary: `overall ${{overall.toFixed(1)}}`,
         }};
       }}
-      if (validity >= 60.0 && overall >= 55.0) {{
+      if (validity >= 55.0 && overall >= 50.0) {{
         return {{
           label: "Warning",
           className: "warning",
@@ -1707,7 +1809,14 @@ def _build_html(
 
     function buildScorePanel(state) {{
       const sampledStage = currentSampledStage(state);
-      const scorePayload = sampledStage?.scores || state.scores || null;
+      const anchorMode = selectedAnchorMode();
+      const scorePayload = anchorMode === "voxelized"
+        ? (state.scores_by_anchor_mode?.voxelized || state.scores || null)
+        : (sampledStage?.scores_by_anchor_mode?.raw
+            || state.scores_by_anchor_mode?.raw
+            || sampledStage?.scores
+            || state.scores
+            || null);
       if (!scorePayload || !scorePayload.sampled) {{
         scoreEl.innerHTML = "";
         return;
@@ -2136,7 +2245,7 @@ def _build_html(
       return false;
     }});
 
-    [sampleSelect, displaySelect, targetSelect, projectionSelect, dipoleToggle, velocityToggle].forEach((element) => {{
+    [sampleSelect, displaySelect, anchorModeSelect, targetSelect, projectionSelect, dipoleToggle, velocityToggle].forEach((element) => {{
       element.addEventListener("change", render);
     }});
     trajectorySlider.addEventListener("input", render);

@@ -513,3 +513,10 @@ def save_samples(path, samples):
 
 def block_palette():
     return {name: spec["color"] for name, spec in LEGO_LIBRARY.items()}
+
+
+def voxelize_anchors(anchors):
+    """Round anchor coordinates to the nearest voxel center with 0.5 threshold."""
+    values = np.asarray(anchors, dtype=np.float32)
+    rounded = np.where(values >= 0.0, np.floor(values + 0.5), np.ceil(values - 0.5))
+    return rounded.astype(np.float32)

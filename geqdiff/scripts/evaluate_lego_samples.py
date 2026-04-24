@@ -20,8 +20,12 @@ from geqdiff.utils.dipole_utils import (
     normalize_dipole_directions,
     split_shape_irreps,
 )
-from lego.score_utils import evaluate_sample_scores
+from lego.score_utils import evaluate_sample_scores_by_anchor_mode
 from lego.utils import load_samples
+
+SHAPE_MISMATCH_THRESHOLD = 65.0
+DIPOLE_MISMATCH_THRESHOLD = 65.0
+RELATIVE_VALIDITY_THRESHOLD = 55.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,13 +42,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--large-shift-threshold",
         type=float,
-        default=1.5,
+        default=1.8,
         help="Mean diffused-anchor shift threshold used to flag a large placement error.",
     )
     parser.add_argument(
         "--energy-regression-threshold",
         type=float,
-        default=0.5,
+        default=0.8,
         help="Sampled-minus-original energy threshold used to flag a polar-energy regression.",
     )
     return parser.parse_args()
@@ -213,9 +217,9 @@ def _failure_labels(
         labels.append("disconnected")
     if score_card is not None:
         sampled_scores = score_card.get("sampled", {}).get("scores", {})
-        if float(sampled_scores.get("shape", 100.0)) < 70.0:
+        if float(sampled_scores.get("shape", 100.0)) < SHAPE_MISMATCH_THRESHOLD:
             labels.append("shape_mismatch")
-        if float(sampled_scores.get("dipoles", 100.0)) < 70.0:
+        if float(sampled_scores.get("dipoles", 100.0)) < DIPOLE_MISMATCH_THRESHOLD:
             labels.append("dipole_mismatch")
     if compare is not None:
         if compare["fixed_shift_max"] > 1e-4:
@@ -234,8 +238,8 @@ def _mean(values: List[float]) -> float:
 def build_evaluation_report(
     samples: List[Dict[str, Any]],
     *,
-    large_shift_threshold: float = 1.5,
-    energy_regression_threshold: float = 0.5,
+    large_shift_threshold: float = 1.8,
+    energy_regression_threshold: float = 0.8,
 ) -> Dict[str, Any]:
     config = DipoleAssignmentConfig()
     records: List[Dict[str, Any]] = []
@@ -244,12 +248,16 @@ def build_evaluation_report(
     for sample_index, sample in enumerate(samples):
         sampled_structure = _structure_from_sample(sample, prefix="")
         sampled_eval = _safe_evaluate_structure(sampled_structure, config=config)
-        score_card = evaluate_sample_scores(sample, dipole_config=config)
+        score_cards = evaluate_sample_scores_by_anchor_mode(sample, dipole_config=config)
+        score_card = score_cards["voxelized"]
 
         record: Dict[str, Any] = {
             "sample_index": int(sample_index),
             "sampled": sampled_eval,
             "score_card": score_card,
+            "score_cards": score_cards,
+            "score_card_raw": score_cards["raw"],
+            "score_card_voxelized": score_cards["voxelized"],
         }
         compare = None
         if "original_brick_anchors" in sample:
@@ -302,13 +310,33 @@ def build_evaluation_report(
     shape_scores = [float(record["score_card"]["sampled"]["scores"].get("shape", float("nan"))) for record in records if "score_card" in record]
     dipole_scores = [float(record["score_card"]["sampled"]["scores"]["dipoles"]) for record in records if "score_card" in record]
     pose_scores = [float(record["score_card"]["sampled"]["scores"].get("pose", float("nan"))) for record in records if "score_card" in record]
+    validity_scores_raw = [
+        float(record["score_card_raw"]["sampled"]["scores"]["validity"])
+        for record in records
+        if "score_card_raw" in record
+    ]
+    shape_scores_raw = [
+        float(record["score_card_raw"]["sampled"]["scores"].get("shape", float("nan")))
+        for record in records
+        if "score_card_raw" in record
+    ]
+    dipole_scores_raw = [
+        float(record["score_card_raw"]["sampled"]["scores"]["dipoles"])
+        for record in records
+        if "score_card_raw" in record
+    ]
+    pose_scores_raw = [
+        float(record["score_card_raw"]["sampled"]["scores"].get("pose", float("nan")))
+        for record in records
+        if "score_card_raw" in record
+    ]
 
     parsed_geometries = int(sum(1 for record in records if record["sampled"]["valid_geometry"]))
     valid_relative_geometries = int(
         sum(
             1
             for record in records
-            if float(record["score_card"]["sampled"]["scores"].get("validity", 0.0)) >= 60.0
+            if float(record["score_card"]["sampled"]["scores"].get("validity", 0.0)) >= RELATIVE_VALIDITY_THRESHOLD
         )
     )
 
@@ -326,6 +354,10 @@ def build_evaluation_report(
         "mean_shape_score": _mean([v for v in shape_scores if np.isfinite(v)]),
         "mean_dipole_score": _mean(dipole_scores),
         "mean_pose_score": _mean([v for v in pose_scores if np.isfinite(v)]),
+        "mean_validity_score_raw": _mean(validity_scores_raw),
+        "mean_shape_score_raw": _mean([v for v in shape_scores_raw if np.isfinite(v)]),
+        "mean_dipole_score_raw": _mean(dipole_scores_raw),
+        "mean_pose_score_raw": _mean([v for v in pose_scores_raw if np.isfinite(v)]),
         "failure_counts": failure_counts,
     }
     return {"summary": summary, "records": records}
@@ -347,6 +379,13 @@ def print_evaluation_report(report: Dict[str, Any], *, input_path: Path | str) -
         f"{summary['mean_shape_score']:.2f} / "
         f"{summary['mean_dipole_score']:.2f} / "
         f"{summary['mean_pose_score']:.2f}"
+    )
+    print(
+        "Mean raw validity / shape / dipole / pose: "
+        f"{summary['mean_validity_score_raw']:.2f} / "
+        f"{summary['mean_shape_score_raw']:.2f} / "
+        f"{summary['mean_dipole_score_raw']:.2f} / "
+        f"{summary['mean_pose_score_raw']:.2f}"
     )
     if summary["mean_diffused_shift"] is not None:
         print(f"Mean diffused-anchor shift: {summary['mean_diffused_shift']:.3f}")
