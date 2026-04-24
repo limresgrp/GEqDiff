@@ -1522,11 +1522,13 @@ def _build_html(
         return NaN;
       }}
       const validity = Number(scoreSet.validity);
+      const shape = Number(scoreSet.shape);
       const dipoles = Number(scoreSet.dipoles);
-      if (![validity, dipoles].every(Number.isFinite)) {{
+      const pose = Number(scoreSet.pose);
+      if (![validity, shape, dipoles, pose].every(Number.isFinite)) {{
         return NaN;
       }}
-      return 0.70 * validity + 0.30 * dipoles;
+      return 0.45 * validity + 0.25 * shape + 0.20 * dipoles + 0.10 * pose;
     }}
 
     function badgePayload(scoreSet) {{
@@ -1621,17 +1623,23 @@ def _build_html(
               ["Severe overlap pairs", "severe_overlapping_pairs", 0],
               ["Max pair overlap", "max_pair_overlap_volume", 3],
               ["Connected components", "num_components", 0],
+              ["Excess effective overlap", "relative_excess_effective_overlap", 3],
+              ["Excess severe pairs", "relative_excess_severe_pairs", 3],
+              ["Excess components", "relative_excess_components", 3],
+              ["Fixed shift max", "relative_fixed_shift_max", 3],
             ], metrics)}}
-            <div class="score-section-title">Compactness</div>
+            <div class="score-section-title">Shape</div>
+            ${{renderMetricRows([
+              ["Shape RMSE", "shape_rmse", 4],
+              ["Type accuracy", "shape_type_accuracy", 3],
+              ["Rotation similarity", "shape_rotation_similarity", 3],
+            ], metrics)}}
+            <div class="score-section-title">Geometric diagnostics</div>
             ${{renderMetricRows([
               ["Matched face area", "matched_face_area", 3],
               ["Matched face ratio", "matched_face_ratio", 3],
               ["Connected brick pairs", "connected_brick_pairs", 0],
               ["Intrinsic faces", "intrinsic_face_count", 0],
-            ], metrics)}}
-            <div class="score-section-title">Shellness</div>
-            ${{renderMetricRows([
-              ["Shell surface ratio", "shell_surface_ratio", 3],
             ], metrics)}}
             <div class="score-section-title">Dipoles</div>
             ${{renderMetricRows([
@@ -1639,6 +1647,10 @@ def _build_html(
               ["Repulsive contacts", "repulsive_contact_count", 0],
               ["Neutral contacts", "neutral_contact_count", 0],
               ["Total face contacts", "total_contact_count", 0],
+              ["Dipole vector cosine", "dipole_vector_cosine", 3],
+              ["Dipole angle (deg)", "dipole_angle_deg", 2],
+              ["Dipole magnitude RMSE", "dipole_magnitude_rmse", 3],
+              ["Dipole energy delta", "dipole_energy_delta", 3],
               ["Dipole total energy", "dipole_total_energy", 3],
               ["Dipole contact energy", "dipole_contact_energy", 3],
               ["Dipole polar cost", "dipole_polar_cost", 3],
@@ -1663,9 +1675,9 @@ def _build_html(
           <div class="score-card-body">
             <div class="score-section-title">Scores</div>
             <div class="metric-row"><span>Validity delta</span><span>${{formatMetric(scoreDelta.validity, 2)}}</span></div>
-            <div class="metric-row"><span>Compactness delta</span><span>${{formatMetric(scoreDelta.compactness, 2)}}</span></div>
-            <div class="metric-row"><span>Shellness delta</span><span>${{formatMetric(scoreDelta.shellness, 2)}}</span></div>
+            <div class="metric-row"><span>Shape delta</span><span>${{formatMetric(scoreDelta.shape, 2)}}</span></div>
             <div class="metric-row"><span>Dipoles delta</span><span>${{formatMetric(scoreDelta.dipoles, 2)}}</span></div>
+            <div class="metric-row"><span>Pose delta</span><span>${{formatMetric(scoreDelta.pose, 2)}}</span></div>
             <div class="score-section-title">Geometry</div>
             ${{renderMetricRows([
               ["Diffused shift mean", "diffused_shift_mean", 3],
@@ -1676,9 +1688,17 @@ def _build_html(
             <div class="score-section-title">Metric deltas</div>
             ${{renderMetricRows([
               ["Overlap delta", "overlap_volume", 3],
-              ["Matched-face ratio delta", "matched_face_ratio", 3],
-              ["Shell surface delta", "shell_surface_ratio", 3],
-              ["Dipole energy delta", "weighted_dipole_energy", 3],
+              ["Excess effective overlap", "relative_excess_effective_overlap", 3],
+              ["Excess severe pairs", "relative_excess_severe_pairs", 3],
+              ["Excess components", "relative_excess_components", 3],
+              ["Shape RMSE", "shape_rmse", 4],
+              ["Type accuracy delta", "shape_type_accuracy", 3],
+              ["Rotation similarity delta", "shape_rotation_similarity", 3],
+              ["Dipole vector cosine delta", "dipole_vector_cosine", 3],
+              ["Dipole angle (deg)", "dipole_angle_deg", 2],
+              ["Dipole magnitude RMSE", "dipole_magnitude_rmse", 3],
+              ["Dipole energy delta", "dipole_energy_delta", 3],
+              ["Weighted dipole energy delta", "weighted_dipole_energy", 3],
             ], deltas)}}
           </div>
         </details>
@@ -1703,9 +1723,9 @@ def _build_html(
           : null
       );
       const validityDelta = formatDelta(scorePayload.compare?.score_delta?.validity);
-      const compactnessDelta = formatDelta(scorePayload.compare?.score_delta?.compactness);
-      const shellnessDelta = formatDelta(scorePayload.compare?.score_delta?.shellness);
+      const shapeDelta = formatDelta(scorePayload.compare?.score_delta?.shape);
       const dipolesDelta = formatDelta(scorePayload.compare?.score_delta?.dipoles);
+      const poseDelta = formatDelta(scorePayload.compare?.score_delta?.pose);
       const sampledBadge = badgePayload(sampledScores);
       const originalBadge = originalScores ? badgePayload(originalScores) : null;
 
@@ -1737,22 +1757,22 @@ def _build_html(
               <td class="score-value score-delta ${{validityDelta.className}}">${{validityDelta.text}}</td>
             </tr>
             <tr>
-              <td class="score-name">Compactness</td>
-              <td class="score-value ${{scoreTone(sampledScores.compactness)}}">${{formatMetric(sampledScores.compactness, 2)}}</td>
-              <td class="score-value ${{originalScores ? scoreTone(originalScores.compactness) : ""}}">${{originalScores ? formatMetric(originalScores.compactness, 2) : "n/a"}}</td>
-              <td class="score-value score-delta ${{compactnessDelta.className}}">${{compactnessDelta.text}}</td>
-            </tr>
-            <tr>
-              <td class="score-name">Shellness</td>
-              <td class="score-value ${{scoreTone(sampledScores.shellness)}}">${{formatMetric(sampledScores.shellness, 2)}}</td>
-              <td class="score-value ${{originalScores ? scoreTone(originalScores.shellness) : ""}}">${{originalScores ? formatMetric(originalScores.shellness, 2) : "n/a"}}</td>
-              <td class="score-value score-delta ${{shellnessDelta.className}}">${{shellnessDelta.text}}</td>
+              <td class="score-name">Shape</td>
+              <td class="score-value ${{scoreTone(sampledScores.shape)}}">${{formatMetric(sampledScores.shape, 2)}}</td>
+              <td class="score-value ${{originalScores ? scoreTone(originalScores.shape) : ""}}">${{originalScores ? formatMetric(originalScores.shape, 2) : "n/a"}}</td>
+              <td class="score-value score-delta ${{shapeDelta.className}}">${{shapeDelta.text}}</td>
             </tr>
             <tr>
               <td class="score-name">Dipoles</td>
               <td class="score-value ${{scoreTone(sampledScores.dipoles)}}">${{formatMetric(sampledScores.dipoles, 2)}}</td>
               <td class="score-value ${{originalScores ? scoreTone(originalScores.dipoles) : ""}}">${{originalScores ? formatMetric(originalScores.dipoles, 2) : "n/a"}}</td>
               <td class="score-value score-delta ${{dipolesDelta.className}}">${{dipolesDelta.text}}</td>
+            </tr>
+            <tr>
+              <td class="score-name">Pose</td>
+              <td class="score-value ${{scoreTone(sampledScores.pose)}}">${{formatMetric(sampledScores.pose, 2)}}</td>
+              <td class="score-value ${{originalScores ? scoreTone(originalScores.pose) : ""}}">${{originalScores ? formatMetric(originalScores.pose, 2) : "n/a"}}</td>
+              <td class="score-value score-delta ${{poseDelta.className}}">${{poseDelta.text}}</td>
             </tr>
           </tbody>
         </table>

@@ -1,96 +1,81 @@
-# SH-to-LEGO Pipeline
+# LEGO Deterministic Scaffold Pipeline
 
-This directory now uses one consistent pipeline:
+This repository now uses a deterministic scaffold generator and direct-tensor flow matching.
 
-1. Sample spherical-harmonic coefficients `c` in the irrep basis
-   `1x0e + 1x1o + 1x2e + 1x3o`.
-2. Turn those coefficients into a radial field
-   `r(u) = base_radius + radial_scale * <c, Y(u)>`,
-   where `u` is a unit direction and `Y(u)` are the real spherical harmonics up to `l = 3`.
-3. Sample that radial field on a latitude/longitude grid to obtain the smooth target surface mesh.
-4. Voxelize the implicit shape in either:
-   `solid` mode by marking a unit cube centered at `x` as occupied when
-   `||x|| <= r(x / ||x||) + voxel_margin`, or
-   `shell` mode by keeping only a surface band near `r(x / ||x||)`.
-   The shell mode also supports a sparsity parameter that thins the band while
-   trying to preserve 6-neighbor connectivity.
-5. Greedily cover the occupied voxels with rotated LEGO primitives (`1x1`, `1x2`, `L-shape`, `T-shape`).
-6. Store both the smooth target mesh and the discrete brick placement in the same sample record.
+## Dataset generation
 
-## Why these irreps
+Main entrypoint: [lego_engine.py](/home/angiod@usi.ch/GEqDiff/lego/lego_engine.py)
 
-For directions on the sphere, the spherical harmonics of degree `l` transform under the `SO(3)` irrep of order `l`.
-Their parity is `(-1)^l`, so the physically consistent basis through `l = 3` is:
+Pipeline per sample:
 
-- `l = 0` -> `0e`
-- `l = 1` -> `1o`
-- `l = 2` -> `2e`
-- `l = 3` -> `3o`
+1. Sample a scaffold topology and 3D anchors (`chain`, `alpha_helix`, `sheet`, `junction`, or `mixed`).
+2. Compute local descriptors (`tangent`, curvature/planarity, branch/junction context).
+3. Assign structural roles from descriptors and topology.
+4. Map roles to deterministic shape prototypes and LEGO brick placements (`1x1`, `1x2`, `L-shape`, `T-shape`).
+5. Assign deterministic color/dipole vectors from local context.
+6. Validate topology and geometry metadata.
 
-That is why the code uses `1x0e + 1x1o + 1x2e + 1x3o` instead of treating every block as even parity.
+Important notes:
 
-## How LEGO blocks are obtained from the irreps
+- The dataset is no longer generated from global SH shell/solid occupancy.
+- `shape_features` are direct 16D coefficients (`1x0e + 1x1o + 1x2e + 1x3o`) from role prototypes.
+- `dipole_direction` is a direct 3D vector target (magnitude encoded in vector norm).
+- `sequence_position` is stored and used as node input (positional categorical embedding in model configs).
 
-The SH coefficients do not directly choose a LEGO piece. They define a continuous target shape first.
-The discrete blocks are then derived in two steps:
+## Training/sampling assumptions
 
-1. `coefficients -> target_voxels`
-   The SH radial field is evaluated on the voxel lattice to decide which unit cubes belong to the shape.
-2. `target_voxels -> brick placements`
-   The engine searches over all 90-degree rotations of the LEGO primitives and greedily picks the piece that covers the most currently uncovered voxels.
+Current LEGO flow-matching setup is **direct-only**:
 
-So the irreps control the global shape, while the LEGO library provides the nearest discrete approximation on the voxel grid.
+- Position head predicts `velocity` for `pos`.
+- Shape head predicts `shape_features_velocity` for `shape_features`.
+- Dipole head predicts `dipole_direction_velocity` for `dipole_direction`.
 
-## Brick features and dipoles
+No decoupled norm+direction coupling path is used anymore in sampling.
 
-Each placed brick now carries two geometric descriptors:
+Main sampler: [sample_lego.py](/home/angiod@usi.ch/GEqDiff/geqdiff/scripts/sample_lego.py)
 
-- `brick_features`
-  A raw 16D SH signature of the brick surface, using the irreps
-  `1x0e + 1x1o + 1x2e + 1x3o`.
-- `brick_dipoles`
-  A simple charge-proxy vector. Neutral bricks use the zero vector.
-  Polar bricks use one discrete axis-aligned dipole in the brick local frame,
-  rotated into world coordinates by the saved `brick_rotations`.
-  Dipoles are assigned by minimizing a contact energy over all touching voxel
-  faces. Same-sign face charges are penalized, opposite-sign face charges are
-  rewarded, and neutral face contacts carry a smaller penalty.
+Shape decoding during sampling:
 
-For diffusion training, the 16D SH signature is further decomposed into:
+- Default is `input_knn`: decode predicted shape coefficients to brick type/rotation using nearest exemplars from the input dataset.
+- Optional `keep_original` can keep original type/rotation.
 
-- `shape_scalar_features`
-  Four scalar magnitudes: one for `l = 0` and one norm for each of `l = 1, 2, 3`.
-- `shape_equiv_features`
-  The corresponding normalized direction blocks for `l = 1, 2, 3`, concatenated into 15 channels.
+## Evaluation metrics
 
-The dipole field is decomposed the same way:
+Scoring logic is in [score_utils.py](/home/angiod@usi.ch/GEqDiff/lego/score_utils.py), report script in [evaluate_lego_samples.py](/home/angiod@usi.ch/GEqDiff/geqdiff/scripts/evaluate_lego_samples.py).
 
-- `dipole_strength`
-  A scalar magnitude.
-- `dipole_direction`
-  A normalized 3D direction.
+For paired sampled/original records, scores are **relative to original baseline**:
 
-This keeps the learned scalar magnitudes separate from the learned equivariant directions.
+- Original is treated as the reference target (`100` for relative score axes).
+- Validity penalizes only *excess* overlap/component issues vs original.
+- Shape score checks deterministic reconstruction (`shape_features` RMSE + type accuracy + rotation similarity).
+- Dipole score checks vector agreement and dipole-energy consistency vs original.
+- Pose score tracks anchor-shift quality for diffused/fixed nodes.
 
-## Canonical dataset schema
+This design avoids over-penalizing overlaps already present in the deterministic dataset itself.
 
-Datasets are saved as an object array under the `samples` key. Each sample contains:
+## Visualization
 
-- `coefficients`: SH coefficients in the 16D irrep basis.
-- `mesh_x`, `mesh_y`, `mesh_z`: the smooth target mesh sampled on a spherical grid.
-- `target_voxels`: occupied integer voxel centers derived from the target mesh.
-- `brick_anchors`, `brick_rotations`, `brick_types`: the LEGO approximation.
-- `brick_features`, `brick_dipoles`: SH descriptors and dipole vectors for each placed brick.
+Visualizer: [lego_visualizer.py](/home/angiod@usi.ch/GEqDiff/lego/lego_visualizer.py)
 
-Compatibility aliases (`pos`, `rotations`, `types`, `features`, `dipoles`) are kept in each sample so older code does not break immediately.
+The HTML score panel now shows:
 
-## Main entry points
+- Overall (weighted validity/shape/dipoles/pose)
+- Validity
+- Shape
+- Dipoles
+- Pose
 
-- `lego_engine.py`
-  Generates SH-defined target blocks, assigns dipoles, and writes the canonical dataset.
-- `lego_visualizer.py`
-  Loads that dataset and lets you switch between the smooth SH target, full brick meshes, per-node SH surfaces, and dipole overlays.
-- `utils.py`
-  Shared SH math, voxelization, dipole-aware dataset I/O, and feature extraction.
-- `lego_blocks.py`
-  Discrete block library plus all 90-degree grid rotations.
+and detailed metric cards for sampled/original/compare, including relative-overlap and deterministic shape/dipole diagnostics.
+
+## Useful files
+
+- Generator: [lego_engine.py](/home/angiod@usi.ch/GEqDiff/lego/lego_engine.py)
+- Scaffold sampler: [scaffold_sampling.py](/home/angiod@usi.ch/GEqDiff/lego/scaffold_sampling.py)
+- Roles/descriptors/prototypes:  
+  [descriptors.py](/home/angiod@usi.ch/GEqDiff/lego/descriptors.py),  
+  [role_assignment.py](/home/angiod@usi.ch/GEqDiff/lego/role_assignment.py),  
+  [shape_prototypes.py](/home/angiod@usi.ch/GEqDiff/lego/shape_prototypes.py),  
+  [color_rules.py](/home/angiod@usi.ch/GEqDiff/lego/color_rules.py)
+- Sampling: [sample_lego.py](/home/angiod@usi.ch/GEqDiff/geqdiff/scripts/sample_lego.py)
+- Evaluation: [evaluate_lego_samples.py](/home/angiod@usi.ch/GEqDiff/geqdiff/scripts/evaluate_lego_samples.py)
+- Scoring core: [score_utils.py](/home/angiod@usi.ch/GEqDiff/lego/score_utils.py)

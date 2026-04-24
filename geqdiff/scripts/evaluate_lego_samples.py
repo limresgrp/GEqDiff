@@ -198,6 +198,7 @@ def _compare_descriptors(sample: Dict[str, Any]) -> Dict[str, Any]:
 
 def _failure_labels(
     sampled_eval: Dict[str, Any],
+    score_card: Dict[str, Any] | None,
     compare: Dict[str, Any] | None,
     large_shift_threshold: float,
     energy_regression_threshold: float,
@@ -210,6 +211,12 @@ def _failure_labels(
         labels.append("repulsion_dominated")
     if sampled_eval["num_components"] > 1:
         labels.append("disconnected")
+    if score_card is not None:
+        sampled_scores = score_card.get("sampled", {}).get("scores", {})
+        if float(sampled_scores.get("shape", 100.0)) < 70.0:
+            labels.append("shape_mismatch")
+        if float(sampled_scores.get("dipoles", 100.0)) < 70.0:
+            labels.append("dipole_mismatch")
     if compare is not None:
         if compare["fixed_shift_max"] > 1e-4:
             labels.append("fixed_bricks_moved")
@@ -237,11 +244,12 @@ def build_evaluation_report(
     for sample_index, sample in enumerate(samples):
         sampled_structure = _structure_from_sample(sample, prefix="")
         sampled_eval = _safe_evaluate_structure(sampled_structure, config=config)
+        score_card = evaluate_sample_scores(sample, dipole_config=config)
 
         record: Dict[str, Any] = {
             "sample_index": int(sample_index),
             "sampled": sampled_eval,
-            "score_card": evaluate_sample_scores(sample, dipole_config=config),
+            "score_card": score_card,
         }
         compare = None
         if "original_brick_anchors" in sample:
@@ -255,6 +263,7 @@ def build_evaluation_report(
 
         failures = _failure_labels(
             sampled_eval=sampled_eval,
+            score_card=score_card,
             compare=compare,
             large_shift_threshold=float(large_shift_threshold),
             energy_regression_threshold=float(energy_regression_threshold),
@@ -290,33 +299,33 @@ def build_evaluation_report(
         if "descriptor_compare" in record and np.isfinite(record["descriptor_compare"]["dipole_direction_angle_deg"])
     ]
     validity_scores = [float(record["score_card"]["sampled"]["scores"]["validity"]) for record in records if "score_card" in record]
-    compactness_scores = [float(record["score_card"]["sampled"]["scores"]["compactness"]) for record in records if "score_card" in record]
-    shellness_scores = [float(record["score_card"]["sampled"]["scores"]["shellness"]) for record in records if "score_card" in record]
+    shape_scores = [float(record["score_card"]["sampled"]["scores"].get("shape", float("nan"))) for record in records if "score_card" in record]
     dipole_scores = [float(record["score_card"]["sampled"]["scores"]["dipoles"]) for record in records if "score_card" in record]
+    pose_scores = [float(record["score_card"]["sampled"]["scores"].get("pose", float("nan"))) for record in records if "score_card" in record]
 
     parsed_geometries = int(sum(1 for record in records if record["sampled"]["valid_geometry"]))
-    valid_like_geometries = int(
+    valid_relative_geometries = int(
         sum(
             1
             for record in records
-            if bool(record["score_card"]["sampled"]["metrics"].get("is_valid_like", False))
+            if float(record["score_card"]["sampled"]["scores"].get("validity", 0.0)) >= 60.0
         )
     )
 
     summary = {
         "num_samples": int(len(records)),
         "parsed_geometries": parsed_geometries,
-        "valid_like_geometries": valid_like_geometries,
-        "valid_geometries": valid_like_geometries,
+        "valid_relative_geometries": valid_relative_geometries,
+        "valid_geometries": valid_relative_geometries,
         "mean_sampled_energy": _mean(sampled_energies),
         "mean_diffused_shift": _mean(diffused_means),
         "mean_energy_delta": _mean(energy_deltas),
         "mean_shape_mse": _mean(shape_mses),
         "mean_dipole_direction_angle_deg": _mean(dipole_angles),
         "mean_validity_score": _mean(validity_scores),
-        "mean_compactness_score": _mean(compactness_scores),
-        "mean_shellness_score": _mean(shellness_scores),
+        "mean_shape_score": _mean([v for v in shape_scores if np.isfinite(v)]),
         "mean_dipole_score": _mean(dipole_scores),
+        "mean_pose_score": _mean([v for v in pose_scores if np.isfinite(v)]),
         "failure_counts": failure_counts,
     }
     return {"summary": summary, "records": records}
@@ -330,14 +339,14 @@ def print_evaluation_report(report: Dict[str, Any], *, input_path: Path | str) -
     print(f"Input: {input_path}")
     print(f"Samples: {summary['num_samples']}")
     print(f"Parsed geometries: {summary['parsed_geometries']}/{summary['num_samples']}")
-    print(f"Valid-like geometries: {summary['valid_like_geometries']}/{summary['num_samples']}")
+    print(f"Relative-valid geometries: {summary['valid_relative_geometries']}/{summary['num_samples']}")
     print(f"Mean sampled energy: {summary['mean_sampled_energy']:.3f}")
     print(
-        "Mean validity / compactness / shellness / dipole scores: "
+        "Mean validity / shape / dipole / pose scores: "
         f"{summary['mean_validity_score']:.2f} / "
-        f"{summary['mean_compactness_score']:.2f} / "
-        f"{summary['mean_shellness_score']:.2f} / "
-        f"{summary['mean_dipole_score']:.2f}"
+        f"{summary['mean_shape_score']:.2f} / "
+        f"{summary['mean_dipole_score']:.2f} / "
+        f"{summary['mean_pose_score']:.2f}"
     )
     if summary["mean_diffused_shift"] is not None:
         print(f"Mean diffused-anchor shift: {summary['mean_diffused_shift']:.3f}")

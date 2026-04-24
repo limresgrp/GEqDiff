@@ -1,150 +1,62 @@
-# Equivariant Tensors in LEGO Flow Matching: Training vs Inference
+# LEGO Flow Matching (Current): Direct-Tensor Training and Sampling
 
-This document describes what the current code does for equivariant tensors (`shape_equiv_features`, `dipole_direction`) during training and sampling, and what each configuration parameter means.
+This is the current behavior used by the LEGO pipeline.
 
 Scope:
-- Training corruption/targets: `geqdiff/nn/flow_matching.py`
-- Sampling/inference: `geqdiff/scripts/sample_lego.py`
-- Readout normalization: `deps/GEqTrain/geqtrain/nn/readout.py`
-- Masked weighted losses: `geqdiff/train/_loss.py`
 
-## 1) Representation used in the LEGO pipeline
+- Training corruption/targets: [flow_matching.py](/home/angiod@usi.ch/GEqDiff/geqdiff/nn/flow_matching.py)
+- Sampling: [sample_lego.py](/home/angiod@usi.ch/GEqDiff/geqdiff/scripts/sample_lego.py)
+- Losses: [\_loss.py](/home/angiod@usi.ch/GEqDiff/geqdiff/train/_loss.py)
 
-- `shape_scalar_features`: `[..., 4]` = `[l0, ||l1||, ||l2||, ||l3||]`
-- `shape_equiv_features`: `[..., 15]` = concatenated normalized directions for `l=1,2,3` blocks (`3 + 5 + 7`)
-- `dipole_strength`: `[..., 1]`
-- `dipole_direction`: `[..., 3]`
+## 1) Fields used (direct only)
 
-Combined physical tensors are reconstructed with:
-- `shape = combine_shape_irreps(shape_scalar_features, shape_equiv_features)`
-- `dipole = dipole_strength * dipole_direction`
+LEGO models now use direct targets (no scalar/equivariant coupling path in sampler):
 
-## 2) Training path (ForwardFlowMatchingModule)
+- `pos` (3D)
+- `shape_features` (16D, irreps `1x0e + 1x1o + 1x2e + 1x3o`)
+- `dipole_direction` (3D vector; magnitude is encoded directly in vector norm)
 
-For each corrupt field in `corrupt_fields`, training computes:
+Deprecated decoupled fields (`shape_scalar_features`, `shape_equiv_features`, `dipole_strength`) are not used by the direct LEGO sampling path.
 
-- Sample `tau ~ U([tau_eps, 1 - tau_eps])`
-- Scheduler:
-  - `data_scale = 1 - tau`
-  - `noise_scale = tau`
-  - derivatives: `ddata/dtau = -1`, `dnoise/dtau = +1`
-- Build noisy state:
+## 2) Training target definition
+
+For each corrupted field `x`:
+
+- Noisy state at time `tau`:
   - `x_tau = (1 - tau) * x + tau * n`
-- Build target velocity:
-  - `target = d/dtau x_tau = n - x`
+- Velocity target:
+  - `v_target = n - x`
 
-Then mask logic:
-- If `mask_field == ""`: all nodes are corrupted and supervised.
-- Else:
-  - masked nodes get `x_tau`, unmasked nodes remain clean (or partially noised if `unmasked_noise_scale > 0`)
-  - unmasked nodes get zero target.
+Only masked nodes (typically `ligand_mask`) are updated/supervised for corrupted fields.
 
-Noise sampling for equivariant fields:
-- `shape_equiv_features`: random unit vectors per SH block (`3,5,7`) then concatenated.
-- `dipole_direction`: random unit vector in `R^3`.
+## 3) Sampling update
 
-Centering:
-- `center` / `center_mask_field` / `center_noise` / `noise_center_mask_field` are applied exactly as configured per field.
-- For shape/dipole fields, centering is usually disabled (`center: false`).
+At each reverse step:
 
-## 3) Direction-magnitude coupling in training targets
+1. Build model input from current state.
+2. Predict direct velocities:
+   - `velocity`
+   - `shape_features_velocity`
+   - `dipole_direction_velocity`
+3. Integrate Euler/Heun in `tau` space.
+4. Merge updates only on masked nodes.
 
-If `directional_velocity_couplings` is enabled, target tensors are rewritten:
+Optional clash guidance modifies `velocity` in score-space but does not reintroduce decoupled tensor logic.
 
-- For each configured `(scalar_index, equiv_slice)`:
-  1. Normalize `equiv_target[equiv_slice]` to unit norm (or zero if tiny).
-  2. Write its norm into `scalar_target[scalar_index]`.
+## 4) Shape decoding
 
-So with coupling enabled, scalar targets become block-speed magnitudes and equivariant targets become directions.
+After integration, continuous `shape_features` are decoded to discrete brick type/rotation via:
 
-Important: this modifies `_target` tensors produced by corruption, not only logging.
+- `input_knn` (default): nearest exemplar in shape-feature space built from the input dataset.
+- `keep_original`: keep original discrete type/rotation.
 
-## 4) Readout behavior (`normalize_equivariant_output`)
+`legacy`/automatic legacy decoding is removed from the direct-only sampler.
 
-For any `ReadoutModule` with equivariant output:
+## 5) Practical checks
 
-- `normalize_equivariant_output: false`: raw equivariant output (free norm).
-- `normalize_equivariant_output: true`: each irrep block is normalized to unit norm (or zero if tiny).
+If sampling quality is poor, check:
 
-This happens in the head output itself, before loss.
-
-## 5) Loss masking for directional channels
-
-Directional losses usually use weighted masked MSE with `weight_field` such as:
-- `shape_l1_weight`, `shape_l2_weight`, `shape_l3_weight`
-- `dipole_direction_weight`
-
-Current behavior in `MaskedWeightedMSELoss`:
-- applies `mask_field` (e.g. `ligand_mask`)
-- and if a matching validity field exists (`*_valid`), it automatically intersects with it:
-  - `shape_l1_weight -> shape_l1_valid`
-  - `dipole_direction_weight -> dipole_direction_valid`
-
-This prevents invalid directional targets from contributing to loss.
-
-## 6) Sampling path (`sample_lego.py`)
-
-Initial state:
-- All fields start from conditioned example.
-- For corrupted fields only, masked nodes are replaced with noise (same noise family as training).
-
-At each step:
-1. Build graph input with current state and current `tau`.
-2. Predict velocities with the model.
-3. Optionally apply `directional_velocity_couplings` on predicted outputs (same direction+magnitude composition idea as training).
-4. Integrate (Euler or Heun):
-   - `x_next = x + (tau_next - tau) * v_pred`
-5. Merge updates only on masked nodes (`ligand_mask` usually).
-
-At decode, normalization is applied again before exporting brick descriptors.
-
-## 7) Dipole worked example
-
-Assume both dipole fields are corrupted:
-- `field: dipole_strength -> out_field: dipole_strength_velocity`
-- `field: dipole_direction -> out_field: dipole_direction_velocity`
-
-Without directional coupling:
-- target strength velocity: `n_s - s`
-- target direction velocity: `n_d - d`
-
-With directional coupling configured on dipole:
-- target direction block is normalized to unit direction.
-- target strength scalar is replaced by that direction-block norm.
-
-## 8) What parameters actually control
-
-- `corrupt_fields[].mask_field`
-  - which nodes are diffused/supervised for that field.
-- `corrupt_fields[].center`
-  - whether that field is mean-centered before noising.
-- `corrupt_fields[].center_noise`
-  - whether sampled noise for that field is also centered.
-- `directional_velocity_couplings`
-  - activates direction/magnitude decomposition for both targets (training) and predictions (sampling).
-- `normalize_equivariant_output` (per readout head)
-  - forces predicted equivariant block norm to 1 (except near-zero blocks).
-
-## 9) Configuration guidance to avoid common mismatches
-
-### A) Pure continuous velocity learning (simpler baseline)
-- `normalize_equivariant_output: false`
-- `directional_velocity_couplings: []`
-- Keep final decode normalization only.
-
-Use this when you want model to learn unconstrained continuous velocities.
-
-### B) Explicit direction+magnitude factorization
-- `normalize_equivariant_output: true` on equivariant heads
-- enable `directional_velocity_couplings`
-- use scalar heads/losses as magnitude channels
-
-If using this mode, keep train/inference conventions consistent and verify endpoint reconstruction, not only velocity loss.
-
-## 10) Minimal debug checklist
-
-1. Confirm `corrupt_field_map` inferred from checkpoint equals what you intended to diffuse.
-2. Print inferred `directional_velocity_couplings` at sampling.
-3. Verify loss masks use `ligand_mask` (or intended mask) and directional validity.
-4. Compare trajectory MSE from noise to final state, not just train loss.
-
+- `corrupt_fields` in model config include exactly the intended direct fields.
+- Training/eval masks (especially `ligand_mask`) are correct.
+- Decode mode (`input_knn`) and candidate size are appropriate for the dataset.
+- Relative evaluation metrics (validity/shape/dipoles/pose) rather than legacy absolute shell/compactness assumptions.
