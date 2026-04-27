@@ -12,6 +12,8 @@ def validate_topology(
     parent_id: np.ndarray,
     branch_id: np.ndarray,
     seq_index_in_branch: np.ndarray,
+    degree_topology: np.ndarray | None = None,
+    max_allowed_degree: int | None = 2,
 ) -> None:
     parent_id = np.asarray(parent_id, dtype=np.int32).reshape(-1)
     branch_id = np.asarray(branch_id, dtype=np.int32).reshape(-1)
@@ -33,6 +35,13 @@ def validate_topology(
             raise ValueError("seq_index_in_branch must be non-negative.")
         if np.unique(order).shape[0] != nodes.shape[0]:
             raise ValueError(f"Duplicate seq_index_in_branch values inside branch {branch}.")
+    if degree_topology is not None and max_allowed_degree is not None:
+        degree = np.asarray(degree_topology, dtype=np.int32).reshape(-1)
+        if int(np.max(degree)) > int(max_allowed_degree):
+            raise ValueError(
+                f"Topology contains branching nodes (max degree={int(np.max(degree))}), "
+                f"but max_allowed_degree={int(max_allowed_degree)}."
+            )
 
 
 def validate_roles(
@@ -66,7 +75,12 @@ def validate_sample(
     role_names: np.ndarray,
     sample_for_geometry: Dict,
 ) -> Dict[str, np.ndarray]:
-    validate_topology(parent_id=parent_id, branch_id=branch_id, seq_index_in_branch=seq_index_in_branch)
+    validate_topology(
+        parent_id=parent_id,
+        branch_id=branch_id,
+        seq_index_in_branch=seq_index_in_branch,
+        degree_topology=degree_topology,
+        max_allowed_degree=2,
+    )
     validate_roles(degree_topology=degree_topology, role_names=role_names)
     return validate_geometry(sample_for_geometry)
-

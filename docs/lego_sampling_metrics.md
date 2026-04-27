@@ -8,29 +8,48 @@ Implementation references:
 - Report script: [evaluate_lego_samples.py](/home/angiod@usi.ch/GEqDiff/geqdiff/scripts/evaluate_lego_samples.py)
 - HTML visualization: [lego_visualizer.py](/home/angiod@usi.ch/GEqDiff/lego/lego_visualizer.py)
 
-## Why relative metrics
+Dataset assumption for current generator:
 
-In the deterministic scaffold dataset, the original structures can contain geometric overlap patterns that are part of the dataset construction itself.
+- scaffold topology is non-branching (node degree \(\le 2\))
+- `T-shape` bricks are local turn/helix motifs, not junction connectors
+- the historical role tag `JUNCTION_T` is kept as a compatibility label for this motif
 
-Because of that, evaluation is done **relative to the original paired structure**:
+## Validity philosophy
 
-- original = reference baseline
-- sampled is penalized for *excess* degradation vs that baseline
+In the deterministic scaffold dataset, the original structures can contain geometric overlap patterns by construction.
 
-This prevents false penalties from dataset-intrinsic overlap.
+For this reason, metrics are now split into:
+
+- `validity` = **absolute generative quality** (clashes/connectivity of generated structure itself)
+- `validity_relative` = **fidelity drift** vs paired original (excess degradation only)
 
 ## Score axes
 
 For paired samples, the UI/report uses:
 
-1. `validity` (relative geometry quality)
-2. `shape` (deterministic shape reconstruction)
-3. `dipoles` (vector + energetic consistency)
-4. `pose` (anchor-shift quality)
+1. `validity` (absolute geometry quality)
+2. `validity_relative` (reference-relative geometry quality)
+3. `shape` (deterministic shape reconstruction)
+4. `dipoles` (vector + energetic consistency)
+5. `pose` (anchor-shift quality)
 
 Overall score in HTML:
 
 - `overall = 0.45 * validity + 0.25 * shape + 0.20 * dipoles + 0.10 * pose`
+
+## Validity (absolute)
+
+Uses generated structure geometry only:
+
+- effective overlap volume
+- severe overlap pair count
+- connected component count
+
+Score:
+
+- `validity = 100 * exp(-w_overlap*effective_overlap - w_severe*severe_pairs) / sqrt(max(num_components, 1))`
+
+This is the main validity axis used in overall score and badges.
 
 ## Validity (relative)
 
@@ -47,9 +66,9 @@ Relative excess terms:
 - `excess_severe_pairs = max(0, sampled_severe - original_severe)`
 - `excess_components = max(0, sampled_components - original_components)`
 
-Score:
+Relative score:
 
-- `validity = 100 * exp(-a*excess_overlap - b*excess_severe - c*excess_components - d*fixed_shift_max)`
+- `validity_relative = 100 * exp(-a*excess_overlap - b*excess_severe - c*excess_components - d*fixed_shift_max)`
 
 with calibrated constants in [score_utils.py](/home/angiod@usi.ch/GEqDiff/lego/score_utils.py).
 
@@ -93,11 +112,14 @@ Score decays exponentially with these shifts.
 
 ## Raw metrics kept for diagnostics
 
-Even with relative scoring, raw fields are still retained and shown:
+Even with absolute validity scoring, raw fields are still retained and shown:
 
 - overlap and clash counts/volumes
 - connectivity
 - matched-face statistics
 - dipole contact counts and energies
 
-This keeps debugging transparent while making final pass/fail interpretation dataset-aware.
+This keeps debugging transparent while separating:
+
+- generation quality (`validity`)
+- reference fidelity (`validity_relative`)

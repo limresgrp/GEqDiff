@@ -13,9 +13,9 @@ ROLE_MAGNITUDE: Dict[str, float] = {
     "BEND_RIGHT": 0.90,
     "PLANAR": 0.80,
     "SHEET_EDGE": 0.70,
-    "JUNCTION_T": 0.15,
-    "JUNCTION_BRANCH_LEFT": 0.65,
-    "JUNCTION_BRANCH_RIGHT": 0.65,
+    "JUNCTION_T": 0.95,
+    "JUNCTION_BRANCH_LEFT": 0.85,
+    "JUNCTION_BRANCH_RIGHT": 0.85,
     "HELIX_PHASE_0": 1.00,
     "HELIX_PHASE_1": 1.00,
     "HELIX_PHASE_2": 1.00,
@@ -66,7 +66,7 @@ def assign_color_and_dipole(
         elif role in {"JUNCTION_BRANCH_LEFT", "JUNCTION_BRANCH_RIGHT"}:
             direction = _normalize(0.6 * _normalize(tangent[idx]) + 0.4 * _normalize(branch_normal[idx]))
         elif role == "JUNCTION_T":
-            direction = _normalize(branch_normal[idx])
+            direction = _normalize(0.7 * _normalize(branch_normal[idx]) + 0.3 * _normalize(tangent[idx]))
         else:
             # Caps and fallback
             sign = -1.0 if role == "CAP_END" else 1.0
@@ -86,4 +86,3 @@ def assign_color_and_dipole(
             elif role.startswith("CAP_"):
                 color_class[idx] = 4
     return color_class.astype(np.int32), dipoles.astype(np.float32)
-

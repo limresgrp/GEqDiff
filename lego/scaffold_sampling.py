@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
@@ -154,22 +154,20 @@ class ScaffoldSampler:
         self.sheet_spacing_max = float(max(sheet_spacing_min, sheet_spacing_max))
         self.junction_angle_min_rad = float(np.deg2rad(max(5.0, junction_angle_min_deg)))
         self.position_noise_std = float(max(0.0, position_noise_std))
-        if self.family not in {"mixed", "chain", "sheet", "junction", "alpha_helix"}:
+        if self.family not in {"mixed", "chain", "sheet", "alpha_helix"}:
             raise ValueError(f"Unsupported scaffold family '{family}'.")
 
     def _choose_family(self, rng: np.random.Generator) -> str:
         if self.family != "mixed":
             return self.family
-        probs = np.asarray(
-            [
-                max(0.05, 1.0 - self.bifurcation_probability),
-                0.35,
-                max(0.05, self.bifurcation_probability),
-            ],
-            dtype=np.float32,
-        )
+        # Mixed mode intentionally excludes branching junctions to keep a
+        # deterministic single-chain ordering and avoid sequence ambiguities.
+        sheet_prob = float(np.clip(self.bifurcation_probability, 0.10, 0.60))
+        alpha_prob = float(np.clip(0.5 * self.chain_helix_probability, 0.10, 0.35))
+        chain_prob = float(max(0.05, 1.0 - sheet_prob - alpha_prob))
+        probs = np.asarray([chain_prob, sheet_prob, alpha_prob], dtype=np.float32)
         probs = probs / np.clip(probs.sum(), 1e-8, None)
-        return str(rng.choice(np.asarray(["chain", "sheet", "junction"]), p=probs))
+        return str(rng.choice(np.asarray(["chain", "sheet", "alpha_helix"]), p=probs))
 
     def _sample_chain_polyline(
         self,
@@ -269,91 +267,6 @@ class ScaffoldSampler:
         strand_labels = raw_labels[nearest].astype(np.int32)
         return points.astype(np.float32), strand_labels
 
-    def _sample_junction_branches(
-        self,
-        target_nodes: int,
-        rng: np.random.Generator,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[int, str]]:
-        target_nodes = int(max(15, target_nodes))
-        parent_len = int(max(6, target_nodes // 3))
-        remaining = int(max(8, target_nodes - parent_len))
-        child_len_1 = int(max(4, remaining // 2))
-        child_len_2 = int(max(4, remaining - child_len_1))
-
-        parent_vox = np.stack(
-            [
-                np.arange(parent_len, dtype=np.int32),
-                np.zeros((parent_len,), dtype=np.int32),
-                np.zeros((parent_len,), dtype=np.int32),
-            ],
-            axis=-1,
-        ).astype(np.int32)
-        junction = parent_vox[-1].astype(np.int32)
-
-        candidate_dirs = [
-            np.asarray([0, 1, 0], dtype=np.int32),
-            np.asarray([0, -1, 0], dtype=np.int32),
-            np.asarray([0, 0, 1], dtype=np.int32),
-            np.asarray([0, 0, -1], dtype=np.int32),
-        ]
-        valid_pairs: List[Tuple[np.ndarray, np.ndarray]] = []
-        for i, d1 in enumerate(candidate_dirs):
-            for d2 in candidate_dirs[i + 1 :]:
-                u1 = _normalize(d1.astype(np.float32))
-                u2 = _normalize(d2.astype(np.float32))
-                angle = float(math.acos(float(np.clip(np.dot(u1, u2), -1.0, 1.0))))
-                if angle >= self.junction_angle_min_rad:
-                    valid_pairs.append((d1, d2))
-        if len(valid_pairs) == 0:
-            valid_pairs.append((np.asarray([0, 1, 0], dtype=np.int32), np.asarray([0, 0, 1], dtype=np.int32)))
-        dir_1, dir_2 = valid_pairs[int(rng.integers(len(valid_pairs)))]
-
-        child_1 = np.asarray([junction + (i + 1) * dir_1 for i in range(child_len_1)], dtype=np.int32)
-        child_2 = np.asarray([junction + (i + 1) * dir_2 for i in range(child_len_2)], dtype=np.int32)
-        occupied = {tuple(v.tolist()) for v in parent_vox}
-        if any(tuple(v.tolist()) in occupied for v in child_1):
-            raise RuntimeError("Child branch 1 intersects parent branch.")
-        occupied.update(tuple(v.tolist()) for v in child_1)
-        if any(tuple(v.tolist()) in occupied for v in child_2):
-            raise RuntimeError("Child branch 2 intersects existing branches.")
-
-        child_kind_1 = "helix" if float(rng.random()) < 0.5 else "sheet"
-        child_kind_2 = "sheet" if child_kind_1 == "helix" else "helix"
-
-        pos = np.concatenate([parent_vox, child_1, child_2], axis=0).astype(np.int32)
-        branch_id = np.concatenate(
-            [
-                np.zeros((parent_vox.shape[0],), dtype=np.int32),
-                np.full((child_1.shape[0],), fill_value=1, dtype=np.int32),
-                np.full((child_2.shape[0],), fill_value=2, dtype=np.int32),
-            ],
-            axis=0,
-        )
-        seq_index = np.concatenate(
-            [
-                np.arange(parent_vox.shape[0], dtype=np.int32),
-                np.arange(child_1.shape[0], dtype=np.int32),
-                np.arange(child_2.shape[0], dtype=np.int32),
-            ],
-            axis=0,
-        )
-        parent = np.full((pos.shape[0],), fill_value=-1, dtype=np.int32)
-        parent[1:parent_vox.shape[0]] = np.arange(parent_vox.shape[0] - 1, dtype=np.int32)
-        child1_start = int(parent_vox.shape[0])
-        child2_start = int(parent_vox.shape[0] + child_1.shape[0])
-        parent[child1_start] = int(parent_vox.shape[0] - 1)
-        parent[child2_start] = int(parent_vox.shape[0] - 1)
-        if child_1.shape[0] > 1:
-            parent[child1_start + 1 : child1_start + child_1.shape[0]] = np.arange(
-                child1_start, child1_start + child_1.shape[0] - 1, dtype=np.int32
-            )
-        if child_2.shape[0] > 1:
-            parent[child2_start + 1 : child2_start + child_2.shape[0]] = np.arange(
-                child2_start, child2_start + child_2.shape[0] - 1, dtype=np.int32
-            )
-        branch_kind = {0: "chain", 1: child_kind_1, 2: child_kind_2}
-        return pos.astype(np.int32), parent.astype(np.int32), branch_id.astype(np.int32), seq_index.astype(np.int32), branch_kind
-
     def _build_tree_degree(self, parent_id: np.ndarray) -> np.ndarray:
         n = int(parent_id.shape[0])
         degree = np.zeros((n,), dtype=np.int32)
@@ -370,8 +283,13 @@ class ScaffoldSampler:
             family = self._choose_family(rng)
             if family in {"chain", "alpha_helix"}:
                 force_regime = "helix" if family == "alpha_helix" else None
+                requested_points = max(10, target_nodes)
+                if family == "alpha_helix":
+                    # Helical curves become longer after voxel connectivity stitching;
+                    # downsample control points so final connected-voxel count stays in range.
+                    requested_points = max(8, int(round(0.6 * float(target_nodes))))
                 points, regime = self._sample_chain_polyline(
-                    n_points=max(10, target_nodes),
+                    n_points=requested_points,
                     rng=rng,
                     force_regime=force_regime,
                 )
@@ -412,7 +330,8 @@ class ScaffoldSampler:
                     hidden_label=hidden.astype(str),
                 )
             if family == "sheet":
-                points, strand_labels = self._sample_sheet_polyline(n_points=max(12, target_nodes), rng=rng)
+                requested_points = max(10, int(round(0.75 * float(target_nodes))))
+                points, strand_labels = self._sample_sheet_polyline(n_points=requested_points, rng=rng)
                 points = points @ _sample_random_rotation(rng).T
                 if self.position_noise_std > 0.0:
                     points = points + rng.normal(scale=self.position_noise_std, size=points.shape).astype(np.float32)
@@ -438,29 +357,4 @@ class ScaffoldSampler:
                     branch_kind=np.asarray(["sheet"] * n, dtype=str),
                     hidden_label=hidden.astype(np.int32),
                 )
-            # junction family
-            try:
-                pos, parent, branch_id, seq_index, branch_kind_map = self._sample_junction_branches(
-                    target_nodes=target_nodes,
-                    rng=rng,
-                )
-            except RuntimeError:
-                continue
-            if not (self.min_nodes <= int(pos.shape[0]) <= self.max_nodes):
-                continue
-            n = int(pos.shape[0])
-            degree = self._build_tree_degree(parent)
-            branch_kind = np.asarray([branch_kind_map[int(b)] for b in branch_id.tolist()], dtype=str)
-            hidden = np.asarray([f"{branch_kind_map[int(b)]}_b{int(b)}" for b in branch_id.tolist()], dtype=str)
-            return Scaffold(
-                pos=pos.astype(np.float32),
-                node_id=np.arange(n, dtype=np.int32),
-                parent_id=parent.astype(np.int32),
-                branch_id=branch_id.astype(np.int32),
-                seq_index_in_branch=seq_index.astype(np.int32),
-                degree_topology=degree.astype(np.int32),
-                family="junction",
-                branch_kind=branch_kind,
-                hidden_label=hidden,
-            )
         raise RuntimeError("Failed to sample a valid scaffold after multiple attempts.")

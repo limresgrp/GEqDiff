@@ -8,8 +8,8 @@ Main entrypoint: [lego_engine.py](/home/angiod@usi.ch/GEqDiff/lego/lego_engine.p
 
 Pipeline per sample:
 
-1. Sample a scaffold topology and 3D anchors (`chain`, `alpha_helix`, `sheet`, `junction`, or `mixed`).
-2. Compute local descriptors (`tangent`, curvature/planarity, branch/junction context).
+1. Sample a scaffold topology and 3D anchors (`chain`, `alpha_helix`, `sheet`, or `mixed`).
+2. Compute local descriptors (`tangent`, curvature/planarity, local branch context).
 3. Assign structural roles from descriptors and topology.
 4. Map roles to deterministic shape prototypes and LEGO brick placements (`1x1`, `1x2`, `L-shape`, `T-shape`).
 5. Assign deterministic color/dipole vectors from local context.
@@ -18,6 +18,9 @@ Pipeline per sample:
 Important notes:
 
 - The dataset is no longer generated from global SH shell/solid occupancy.
+- Junction graph topologies are disabled by design to avoid sequence-order ambiguity on large datasets.
+- `T-shape` bricks are now used as local turn/helix motifs (sparse high-curvature sites), not as branch-junction connectors.
+- For backward compatibility, this motif currently reuses the historical role label `JUNCTION_T`.
 - `shape_features` are direct 16D coefficients (`1x0e + 1x1o + 1x2e + 1x3o`) from role prototypes.
 - `dipole_direction` is a direct 3D vector target (magnitude encoded in vector norm).
 - `sequence_position` is stored and used as node input (positional categorical embedding in model configs).
@@ -43,15 +46,13 @@ Shape decoding during sampling:
 
 Scoring logic is in [score_utils.py](/home/angiod@usi.ch/GEqDiff/lego/score_utils.py), report script in [evaluate_lego_samples.py](/home/angiod@usi.ch/GEqDiff/geqdiff/scripts/evaluate_lego_samples.py).
 
-For paired sampled/original records, scores are **relative to original baseline**:
+For paired sampled/original records, scoring uses mixed semantics:
 
-- Original is treated as the reference target (`100` for relative score axes).
-- Validity penalizes only *excess* overlap/component issues vs original.
-- Shape score checks deterministic reconstruction (`shape_features` RMSE + type accuracy + rotation similarity).
-- Dipole score checks vector agreement and dipole-energy consistency vs original.
-- Pose score tracks anchor-shift quality for diffused/fixed nodes.
+- `validity` is **absolute** (clashes/connectivity on generated structure itself).
+- `validity_relative` measures excess degradation vs original.
+- `shape`, `dipoles`, `pose` are reference/fidelity-oriented scores.
 
-This design avoids over-penalizing overlaps already present in the deterministic dataset itself.
+This preserves generative validity while still exposing fidelity drift to the paired target.
 
 ## Visualization
 
@@ -61,6 +62,7 @@ The HTML score panel now shows:
 
 - Overall (weighted validity/shape/dipoles/pose)
 - Validity
+- Validity (Relative)
 - Shape
 - Dipoles
 - Pose

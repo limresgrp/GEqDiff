@@ -31,6 +31,8 @@ DEFAULT_HELIX_PHASE_PERIOD=""
 DEFAULT_TAU_STRAIGHT=""
 DEFAULT_TAU_PLANAR=""
 DEFAULT_TAU_JUNCTION_DEGREE=""
+DEFAULT_T_SHAPE_MIN_GAP=""
+DEFAULT_T_SHAPE_CURVATURE_THRESHOLD=""
 DEFAULT_SEQUENCE_POS_MAX=""
 DEFAULT_SHAPE_NOISE_SCALE=""
 DEFAULT_DIPOLE_NOISE_SCALE=""
@@ -51,6 +53,8 @@ apply_standard_scaffold_preset() {
   DEFAULT_TAU_STRAIGHT="0.35"
   DEFAULT_TAU_PLANAR="0.34"
   DEFAULT_TAU_JUNCTION_DEGREE="3"
+  DEFAULT_T_SHAPE_MIN_GAP="3"
+  DEFAULT_T_SHAPE_CURVATURE_THRESHOLD="0.60"
   DEFAULT_SEQUENCE_POS_MAX=""
   DEFAULT_SHAPE_NOISE_SCALE="0.0"
   DEFAULT_DIPOLE_NOISE_SCALE="0.0"
@@ -72,6 +76,8 @@ apply_tiny_scaffold_preset() {
   DEFAULT_TAU_STRAIGHT="0.30"
   DEFAULT_TAU_PLANAR="0.30"
   DEFAULT_TAU_JUNCTION_DEGREE="3"
+  DEFAULT_T_SHAPE_MIN_GAP="3"
+  DEFAULT_T_SHAPE_CURVATURE_THRESHOLD="0.60"
   DEFAULT_SEQUENCE_POS_MAX=""
   DEFAULT_SHAPE_NOISE_SCALE="0.0"
   DEFAULT_DIPOLE_NOISE_SCALE="0.0"
@@ -259,7 +265,8 @@ show_defaults() {
   echo "  Helix phase period   ${DEFAULT_HELIX_PHASE_PERIOD}"
   echo "  Tau straight         ${DEFAULT_TAU_STRAIGHT}"
   echo "  Tau planar           ${DEFAULT_TAU_PLANAR}"
-  echo "  Tau junction degree  ${DEFAULT_TAU_JUNCTION_DEGREE}"
+  echo "  T-shape min gap      ${DEFAULT_T_SHAPE_MIN_GAP}"
+  echo "  T-shape curv thr     ${DEFAULT_T_SHAPE_CURVATURE_THRESHOLD}"
   echo "  Sequence pos max     ${DEFAULT_SEQUENCE_POS_MAX:-auto}"
   echo "  Shape noise scale    ${DEFAULT_SHAPE_NOISE_SCALE}"
   echo "  Dipole noise scale   ${DEFAULT_DIPOLE_NOISE_SCALE}"
@@ -267,20 +274,22 @@ show_defaults() {
 
 generate_source_dataset() {
   local samples seed output_path scaffold_family min_nodes max_nodes sequence_pos_max
-  local bifurcation_probability helix_phase_period tau_straight tau_planar tau_junction_degree
+  local bifurcation_probability helix_phase_period tau_straight tau_planar
+  local t_shape_min_gap t_shape_curvature_threshold
   local shape_noise_scale dipole_noise_scale
 
   samples="$(prompt_with_default "Number of source LEGO examples" "${DEFAULT_SOURCE_SAMPLES}")"
   seed="$(prompt_with_default "Random seed" "13")"
   output_path="$(prompt_with_default "Output source dataset path" "${SOURCE_DATASET_PATH}")"
-  scaffold_family="$(prompt_with_default "Scaffold family (mixed/chain/alpha_helix/sheet/junction)" "${DEFAULT_SCAFFOLD_FAMILY}")"
+  scaffold_family="$(prompt_with_default "Scaffold family (mixed/chain/alpha_helix/sheet)" "${DEFAULT_SCAFFOLD_FAMILY}")"
   min_nodes="$(prompt_with_default "Minimum nodes per sample" "${DEFAULT_MIN_NODES}")"
   max_nodes="$(prompt_with_default "Maximum nodes per sample" "${DEFAULT_MAX_NODES}")"
   bifurcation_probability="$(prompt_with_default "Bifurcation probability (for mixed)" "${DEFAULT_BIFURCATION_PROBABILITY}")"
   helix_phase_period="$(prompt_with_default "Helix phase period" "${DEFAULT_HELIX_PHASE_PERIOD}")"
   tau_straight="$(prompt_with_default "Tau straight threshold" "${DEFAULT_TAU_STRAIGHT}")"
   tau_planar="$(prompt_with_default "Tau planar threshold" "${DEFAULT_TAU_PLANAR}")"
-  tau_junction_degree="$(prompt_with_default "Tau junction degree threshold" "${DEFAULT_TAU_JUNCTION_DEGREE}")"
+  t_shape_min_gap="$(prompt_with_default "T-shape minimum sequence gap" "${DEFAULT_T_SHAPE_MIN_GAP}")"
+  t_shape_curvature_threshold="$(prompt_with_default "T-shape curvature threshold" "${DEFAULT_T_SHAPE_CURVATURE_THRESHOLD}")"
   shape_noise_scale="$(prompt_with_default "Shape noise scale" "${DEFAULT_SHAPE_NOISE_SCALE}")"
   dipole_noise_scale="$(prompt_with_default "Dipole noise scale" "${DEFAULT_DIPOLE_NOISE_SCALE}")"
   sequence_pos_max="${DEFAULT_SEQUENCE_POS_MAX}"
@@ -304,7 +313,8 @@ generate_source_dataset() {
     --helix-phase-period "${helix_phase_period}"
     --tau-straight "${tau_straight}"
     --tau-planar "${tau_planar}"
-    --tau-junction-degree "${tau_junction_degree}"
+    --t-shape-min-gap "${t_shape_min_gap}"
+    --t-shape-curvature-threshold "${t_shape_curvature_threshold}"
     --shape-noise-scale "${shape_noise_scale}"
     --dipole-noise-scale "${dipole_noise_scale}"
   )

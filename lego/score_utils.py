@@ -519,12 +519,13 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
                 "weighted_dipole_energy": 0.0,
             },
         }
-    payload: Dict[str, Any] = {"sampled": sampled, "score_mode": "relative_to_original"}
+    payload: Dict[str, Any] = {"sampled": sampled, "score_mode": "absolute_validity_relative_fidelity"}
 
     if "original_brick_anchors" not in sample:
         sampled["scores"] = dict(sampled.get("scores", {}))
         sampled["scores"].setdefault("shape", float(sampled["scores"].get("compactness", sampled["scores"].get("fitness", 0.0))))
         sampled["scores"].setdefault("pose", float(sampled["scores"].get("validity", 0.0)))
+        sampled["scores"].setdefault("validity_relative", float(sampled["scores"].get("validity", 0.0)))
         return payload
 
     try:
@@ -569,7 +570,7 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
 
     sampled_mask = np.asarray(sample.get("sampled_brick_mask", np.zeros((len(sample["brick_anchors"]),), dtype=bool)), dtype=bool).reshape(-1)
     anchor_shift = _shift_compare(sample)
-    validity_score, validity_details = _relative_validity_score(
+    validity_relative_score, validity_details = _relative_validity_score(
         sampled["metrics"],
         original["metrics"],
         fixed_shift_max=float(anchor_shift["fixed_shift_max"]),
@@ -585,11 +586,11 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
         )
     )
 
-    # Make the reference structure the canonical 100 baseline for relative metrics.
+    # Keep validity as absolute geometry quality; add relative validity as a separate axis.
     original["scores"] = dict(original["scores"])
     original["scores"].update(
         {
-            "validity": 100.0,
+            "validity_relative": 100.0,
             "shape": 100.0,
             "dipoles": 100.0,
             "pose": 100.0,
@@ -598,7 +599,7 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
     sampled["scores"] = dict(sampled["scores"])
     sampled["scores"].update(
         {
-            "validity": float(validity_score),
+            "validity_relative": float(validity_relative_score),
             "shape": float(shape_score),
             "dipoles": float(dipoles_score),
             "pose": float(pose_score),
@@ -624,6 +625,7 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
     payload["compare"] = {
         "score_delta": {
             "validity": float(sampled["scores"]["validity"] - original["scores"]["validity"]),
+            "validity_relative": float(sampled["scores"]["validity_relative"] - original["scores"]["validity_relative"]),
             "shape": float(sampled["scores"]["shape"] - original["scores"]["shape"]),
             "dipoles": float(sampled["scores"]["dipoles"] - original["scores"]["dipoles"]),
             "pose": float(sampled["scores"]["pose"] - original["scores"]["pose"]),

@@ -35,17 +35,20 @@ def _branch_orders(branch_id: np.ndarray, seq_index_in_branch: np.ndarray) -> Di
     return orders
 
 
-def _junction_child_roots(parent_id: np.ndarray, node_index: int) -> np.ndarray:
-    parent_id = np.asarray(parent_id, dtype=np.int32).reshape(-1)
-    return np.flatnonzero(parent_id == int(node_index)).astype(np.int32)
-
-
-def _signed_turn(parent_tangent: np.ndarray, child_tangent: np.ndarray, normal: np.ndarray) -> float:
-    parent_tangent = np.asarray(parent_tangent, dtype=np.float32)
-    child_tangent = np.asarray(child_tangent, dtype=np.float32)
-    normal = np.asarray(normal, dtype=np.float32)
-    cross = np.cross(parent_tangent, child_tangent).astype(np.float32)
-    return float(np.dot(cross, normal))
+def _select_spaced(order: np.ndarray, candidates: List[int], min_gap: int) -> List[int]:
+    if len(candidates) == 0:
+        return []
+    rank = {int(node): idx for idx, node in enumerate(order.tolist())}
+    selected: List[int] = []
+    for node in candidates:
+        node_i = int(node)
+        node_rank = int(rank.get(node_i, -10**9))
+        if len(selected) == 0:
+            selected.append(node_i)
+            continue
+        if all(abs(node_rank - int(rank[int(prev)])) >= int(min_gap) for prev in selected):
+            selected.append(node_i)
+    return selected
 
 
 def assign_roles(
@@ -60,6 +63,8 @@ def assign_roles(
     tau_planar: float = 0.34,
     junction_degree_threshold: int = 3,
     helix_phase_period: int = 4,
+    t_shape_min_gap: int = 3,
+    t_shape_curvature_threshold: float = 0.60,
 ) -> Tuple[np.ndarray, np.ndarray]:
     parent_id = np.asarray(parent_id, dtype=np.int32).reshape(-1)
     branch_id = np.asarray(branch_id, dtype=np.int32).reshape(-1)
@@ -78,38 +83,6 @@ def assign_roles(
 
     roles = np.full((n,), fill_value=ROLE_TO_ID["STRAIGHT"], dtype=np.int32)
     locked = np.zeros((n,), dtype=bool)
-    junction_nodes = np.flatnonzero(degree_topology >= int(max(2, junction_degree_threshold))).astype(np.int32)
-
-    # Junction anchors and immediate branch starts.
-    for node in junction_nodes.tolist():
-        roles[int(node)] = ROLE_TO_ID["JUNCTION_T"]
-        locked[int(node)] = True
-        child_roots = _junction_child_roots(parent_id=parent_id, node_index=int(node))
-        if child_roots.size == 0:
-            continue
-        parent_t = tangent[int(node)]
-        normal = branch_local_normal[int(node)]
-        signed = []
-        for child in child_roots.tolist():
-            sign = _signed_turn(parent_t, tangent[int(child)], normal)
-            signed.append((float(sign), int(child)))
-        signed.sort(key=lambda item: item[0], reverse=True)
-        if len(signed) > 0:
-            _, child_left = signed[0]
-            roles[int(child_left)] = ROLE_TO_ID["JUNCTION_BRANCH_LEFT"]
-            locked[int(child_left)] = True
-            child2 = next_same_branch[int(child_left)]
-            if child2 >= 0:
-                roles[int(child2)] = ROLE_TO_ID["JUNCTION_BRANCH_LEFT"]
-                locked[int(child2)] = True
-        if len(signed) > 1:
-            _, child_right = signed[-1]
-            roles[int(child_right)] = ROLE_TO_ID["JUNCTION_BRANCH_RIGHT"]
-            locked[int(child_right)] = True
-            child2 = next_same_branch[int(child_right)]
-            if child2 >= 0:
-                roles[int(child2)] = ROLE_TO_ID["JUNCTION_BRANCH_RIGHT"]
-                locked[int(child2)] = True
 
     # First-pass geometry rules.
     for node in range(n):
@@ -146,9 +119,6 @@ def assign_roles(
     protected = {
         ROLE_TO_ID["CAP_START"],
         ROLE_TO_ID["CAP_END"],
-        ROLE_TO_ID["JUNCTION_T"],
-        ROLE_TO_ID["JUNCTION_BRANCH_LEFT"],
-        ROLE_TO_ID["JUNCTION_BRANCH_RIGHT"],
     }
 
     for branch, order in orders.items():
@@ -172,10 +142,51 @@ def assign_roles(
                 phase = int(seq_index_in_branch[node_i] % int(max(1, helix_phase_period)))
                 roles[node_i] = ROLE_TO_ID[f"HELIX_PHASE_{phase % 4}"]
 
-    # Enforce exactly one JUNCTION_T label per high-degree node.
+    # Promote a sparse set of turn-sensitive sites to T-shape role.
+    # The label name is preserved for backward compatibility (`JUNCTION_T`),
+    # but this role is now used for helix/turn local motifs rather than graph branching.
+    min_gap = int(max(2, t_shape_min_gap))
+    curvature_thr = float(max(0.0, t_shape_curvature_threshold))
+    for _, order in orders.items():
+        if order.size < 3:
+            continue
+        kind = str(branch_kind[int(order[0])]).lower()
+        ranked: List[Tuple[float, int]] = []
+        for node in order.tolist():
+            node_i = int(node)
+            if bool(boundary_flag[node_i]):
+                continue
+            if roles[node_i] in protected:
+                continue
+            phase = int(seq_index_in_branch[node_i] % int(max(1, helix_phase_period)))
+            if kind.startswith("helix"):
+                if phase not in {1, 3}:
+                    continue
+                score = float(curvature[node_i] + 0.5 * planarity[node_i])
+                ranked.append((score, node_i))
+                continue
+            if roles[node_i] not in {ROLE_TO_ID["BEND_LEFT"], ROLE_TO_ID["BEND_RIGHT"]}:
+                continue
+            if float(curvature[node_i]) < curvature_thr:
+                continue
+            score = float(curvature[node_i] + 0.25 * abs(float(np.dot(bend_axis[node_i], branch_local_normal[node_i]))))
+            ranked.append((score, node_i))
+
+        if len(ranked) == 0:
+            continue
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        ordered_candidates = [int(node) for _, node in ranked]
+        selected = _select_spaced(order=order, candidates=ordered_candidates, min_gap=min_gap)
+        # Keep density bounded for readability and to avoid overusing T-shapes.
+        max_t = int(max(1, order.size // 6))
+        for node_i in selected[:max_t]:
+            roles[int(node_i)] = ROLE_TO_ID["JUNCTION_T"]
+
+    # Compatibility guard: if a dataset still contains high-degree nodes,
+    # force those nodes to the same historical role.
+    junction_nodes = np.flatnonzero(degree_topology >= int(max(2, junction_degree_threshold))).astype(np.int32)
     for node in junction_nodes.tolist():
         roles[int(node)] = ROLE_TO_ID["JUNCTION_T"]
 
     role_names = np.asarray([ROLE_NAMES[int(role_id)] for role_id in roles.tolist()], dtype=f"<U{max(len(x) for x in ROLE_NAMES)}")
     return roles.astype(np.int32), role_names
-

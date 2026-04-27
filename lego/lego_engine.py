@@ -2,6 +2,9 @@
 
 This replaces legacy SH/shell and heuristic post-hoc placement flows with:
 positions + topology -> descriptors -> roles -> shape/color/dipole.
+
+Current scaffold generation excludes graph junctions to keep a deterministic
+single-chain ordering; T-shapes are instead assigned as local turn motifs.
 """
 
 from __future__ import annotations
@@ -51,6 +54,8 @@ class LegoDeterministicEngine:
         tau_straight: float = 0.35,
         tau_planar: float = 0.34,
         tau_junction_degree: int = 3,
+        t_shape_min_gap: int = 3,
+        t_shape_curvature_threshold: float = 0.60,
         helix_phase_period: int = 4,
         shape_noise_scale: float = 0.0,
         dipole_noise_scale: float = 0.0,
@@ -65,6 +70,8 @@ class LegoDeterministicEngine:
         self.tau_straight = float(max(0.0, tau_straight))
         self.tau_planar = float(max(0.0, tau_planar))
         self.tau_junction_degree = int(max(2, tau_junction_degree))
+        self.t_shape_min_gap = int(max(2, t_shape_min_gap))
+        self.t_shape_curvature_threshold = float(max(0.0, t_shape_curvature_threshold))
         self.helix_phase_period = int(max(2, helix_phase_period))
         self.shape_noise_scale = float(max(0.0, shape_noise_scale))
         self.dipole_noise_scale = float(max(0.0, dipole_noise_scale))
@@ -128,6 +135,8 @@ class LegoDeterministicEngine:
             tau_planar=self.tau_planar,
             junction_degree_threshold=self.tau_junction_degree,
             helix_phase_period=self.helix_phase_period,
+            t_shape_min_gap=self.t_shape_min_gap,
+            t_shape_curvature_threshold=self.t_shape_curvature_threshold,
         )
 
         shape_payload = map_roles_to_shapes(
@@ -152,6 +161,9 @@ class LegoDeterministicEngine:
         dipole_dirs = normalize_dipole_directions(dipoles)
         dipole_mag = dipole_strengths(dipoles)
         sequence_position = self._sequence_positions(node_count=int(anchors.shape[0]))
+
+        if int(np.max(degree_topology)) > 2:
+            raise RuntimeError("Scaffold generator produced a branching topology (degree > 2), which is disallowed.")
 
         sample = {
             "coefficients": np.zeros((16,), dtype=np.float32),
@@ -223,7 +235,7 @@ class LegoDeterministicEngine:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate deterministic scaffold-based LEGO samples (chain/sheet/junction)."
+        description="Generate deterministic scaffold-based LEGO samples (chain/sheet/helix, no junction topologies)."
     )
     parser.add_argument("--samples", type=int, default=1, help="Number of samples to generate.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
@@ -232,7 +244,7 @@ def parse_args() -> argparse.Namespace:
         "--scaffold-family",
         type=str,
         default="mixed",
-        choices=["mixed", "chain", "alpha_helix", "sheet", "junction"],
+        choices=["mixed", "chain", "alpha_helix", "sheet"],
     )
     parser.add_argument("--min-nodes", type=int, default=18)
     parser.add_argument("--max-nodes", type=int, default=40)
@@ -253,6 +265,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tau-straight", type=float, default=0.35)
     parser.add_argument("--tau-planar", type=float, default=0.34)
     parser.add_argument("--tau-junction-degree", type=int, default=3)
+    parser.add_argument("--t-shape-min-gap", type=int, default=3)
+    parser.add_argument("--t-shape-curvature-threshold", type=float, default=0.60)
     parser.add_argument("--helix-phase-period", type=int, default=4)
     parser.add_argument("--shape-noise-scale", type=float, default=0.0)
     parser.add_argument("--dipole-noise-scale", type=float, default=0.0)
@@ -284,6 +298,8 @@ def main() -> None:
         tau_straight=args.tau_straight,
         tau_planar=args.tau_planar,
         tau_junction_degree=args.tau_junction_degree,
+        t_shape_min_gap=args.t_shape_min_gap,
+        t_shape_curvature_threshold=args.t_shape_curvature_threshold,
         helix_phase_period=args.helix_phase_period,
         shape_noise_scale=args.shape_noise_scale,
         dipole_noise_scale=args.dipole_noise_scale,

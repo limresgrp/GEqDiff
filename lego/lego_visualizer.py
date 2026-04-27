@@ -1777,6 +1777,7 @@ def _build_html(
           <div class="score-card-body">
             <div class="score-section-title">Scores</div>
             <div class="metric-row"><span>Validity delta</span><span>${{formatMetric(scoreDelta.validity, 2)}}</span></div>
+            <div class="metric-row"><span>Validity relative delta</span><span>${{formatMetric(scoreDelta.validity_relative, 2)}}</span></div>
             <div class="metric-row"><span>Shape delta</span><span>${{formatMetric(scoreDelta.shape, 2)}}</span></div>
             <div class="metric-row"><span>Dipoles delta</span><span>${{formatMetric(scoreDelta.dipoles, 2)}}</span></div>
             <div class="metric-row"><span>Pose delta</span><span>${{formatMetric(scoreDelta.pose, 2)}}</span></div>
@@ -1832,6 +1833,7 @@ def _build_html(
           : null
       );
       const validityDelta = formatDelta(scorePayload.compare?.score_delta?.validity);
+      const validityRelativeDelta = formatDelta(scorePayload.compare?.score_delta?.validity_relative);
       const shapeDelta = formatDelta(scorePayload.compare?.score_delta?.shape);
       const dipolesDelta = formatDelta(scorePayload.compare?.score_delta?.dipoles);
       const poseDelta = formatDelta(scorePayload.compare?.score_delta?.pose);
@@ -1864,6 +1866,12 @@ def _build_html(
               <td class="score-value ${{scoreTone(sampledScores.validity)}}">${{formatMetric(sampledScores.validity, 2)}}</td>
               <td class="score-value ${{originalScores ? scoreTone(originalScores.validity) : ""}}">${{originalScores ? formatMetric(originalScores.validity, 2) : "n/a"}}</td>
               <td class="score-value score-delta ${{validityDelta.className}}">${{validityDelta.text}}</td>
+            </tr>
+            <tr>
+              <td class="score-name">Validity (Relative)</td>
+              <td class="score-value">${{formatMetric(sampledScores.validity_relative, 2)}}</td>
+              <td class="score-value">${{originalScores ? formatMetric(originalScores.validity_relative, 2) : "n/a"}}</td>
+              <td class="score-value score-delta ${{validityRelativeDelta.className}}">${{validityRelativeDelta.text}}</td>
             </tr>
             <tr>
               <td class="score-name">Shape</td>

@@ -25,6 +25,7 @@ from lego.utils import load_samples
 
 SHAPE_MISMATCH_THRESHOLD = 65.0
 DIPOLE_MISMATCH_THRESHOLD = 65.0
+VALIDITY_ABSOLUTE_THRESHOLD = 55.0
 RELATIVE_VALIDITY_THRESHOLD = 55.0
 
 
@@ -307,11 +308,21 @@ def build_evaluation_report(
         if "descriptor_compare" in record and np.isfinite(record["descriptor_compare"]["dipole_direction_angle_deg"])
     ]
     validity_scores = [float(record["score_card"]["sampled"]["scores"]["validity"]) for record in records if "score_card" in record]
+    validity_relative_scores = [
+        float(record["score_card"]["sampled"]["scores"].get("validity_relative", record["score_card"]["sampled"]["scores"].get("validity", float("nan"))))
+        for record in records
+        if "score_card" in record
+    ]
     shape_scores = [float(record["score_card"]["sampled"]["scores"].get("shape", float("nan"))) for record in records if "score_card" in record]
     dipole_scores = [float(record["score_card"]["sampled"]["scores"]["dipoles"]) for record in records if "score_card" in record]
     pose_scores = [float(record["score_card"]["sampled"]["scores"].get("pose", float("nan"))) for record in records if "score_card" in record]
     validity_scores_raw = [
         float(record["score_card_raw"]["sampled"]["scores"]["validity"])
+        for record in records
+        if "score_card_raw" in record
+    ]
+    validity_relative_scores_raw = [
+        float(record["score_card_raw"]["sampled"]["scores"].get("validity_relative", record["score_card_raw"]["sampled"]["scores"].get("validity", float("nan"))))
         for record in records
         if "score_card_raw" in record
     ]
@@ -332,11 +343,18 @@ def build_evaluation_report(
     ]
 
     parsed_geometries = int(sum(1 for record in records if record["sampled"]["valid_geometry"]))
+    valid_geometries = int(
+        sum(
+            1
+            for record in records
+            if float(record["score_card"]["sampled"]["scores"].get("validity", 0.0)) >= VALIDITY_ABSOLUTE_THRESHOLD
+        )
+    )
     valid_relative_geometries = int(
         sum(
             1
             for record in records
-            if float(record["score_card"]["sampled"]["scores"].get("validity", 0.0)) >= RELATIVE_VALIDITY_THRESHOLD
+            if float(record["score_card"]["sampled"]["scores"].get("validity_relative", record["score_card"]["sampled"]["scores"].get("validity", 0.0))) >= RELATIVE_VALIDITY_THRESHOLD
         )
     )
 
@@ -344,17 +362,19 @@ def build_evaluation_report(
         "num_samples": int(len(records)),
         "parsed_geometries": parsed_geometries,
         "valid_relative_geometries": valid_relative_geometries,
-        "valid_geometries": valid_relative_geometries,
+        "valid_geometries": valid_geometries,
         "mean_sampled_energy": _mean(sampled_energies),
         "mean_diffused_shift": _mean(diffused_means),
         "mean_energy_delta": _mean(energy_deltas),
         "mean_shape_mse": _mean(shape_mses),
         "mean_dipole_direction_angle_deg": _mean(dipole_angles),
         "mean_validity_score": _mean(validity_scores),
+        "mean_validity_relative_score": _mean([v for v in validity_relative_scores if np.isfinite(v)]),
         "mean_shape_score": _mean([v for v in shape_scores if np.isfinite(v)]),
         "mean_dipole_score": _mean(dipole_scores),
         "mean_pose_score": _mean([v for v in pose_scores if np.isfinite(v)]),
         "mean_validity_score_raw": _mean(validity_scores_raw),
+        "mean_validity_relative_score_raw": _mean([v for v in validity_relative_scores_raw if np.isfinite(v)]),
         "mean_shape_score_raw": _mean([v for v in shape_scores_raw if np.isfinite(v)]),
         "mean_dipole_score_raw": _mean(dipole_scores_raw),
         "mean_pose_score_raw": _mean([v for v in pose_scores_raw if np.isfinite(v)]),
@@ -371,18 +391,21 @@ def print_evaluation_report(report: Dict[str, Any], *, input_path: Path | str) -
     print(f"Input: {input_path}")
     print(f"Samples: {summary['num_samples']}")
     print(f"Parsed geometries: {summary['parsed_geometries']}/{summary['num_samples']}")
+    print(f"Valid geometries (absolute validity): {summary['valid_geometries']}/{summary['num_samples']}")
     print(f"Relative-valid geometries: {summary['valid_relative_geometries']}/{summary['num_samples']}")
     print(f"Mean sampled energy: {summary['mean_sampled_energy']:.3f}")
     print(
-        "Mean validity / shape / dipole / pose scores: "
+        "Mean validity(abs) / validity(rel) / shape / dipole / pose scores: "
         f"{summary['mean_validity_score']:.2f} / "
+        f"{summary['mean_validity_relative_score']:.2f} / "
         f"{summary['mean_shape_score']:.2f} / "
         f"{summary['mean_dipole_score']:.2f} / "
         f"{summary['mean_pose_score']:.2f}"
     )
     print(
-        "Mean raw validity / shape / dipole / pose: "
+        "Mean raw validity(abs) / validity(rel) / shape / dipole / pose: "
         f"{summary['mean_validity_score_raw']:.2f} / "
+        f"{summary['mean_validity_relative_score_raw']:.2f} / "
         f"{summary['mean_shape_score_raw']:.2f} / "
         f"{summary['mean_dipole_score_raw']:.2f} / "
         f"{summary['mean_pose_score_raw']:.2f}"
