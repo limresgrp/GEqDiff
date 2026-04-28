@@ -41,14 +41,15 @@ class LegoDeterministicEngine:
         bifurcation_probability: float = 0.45,
         chain_helix_probability: float = 0.45,
         chain_curved_probability: float = 0.30,
-        helix_radius_min: float = 1.2,
-        helix_radius_max: float = 2.0,
-        helix_pitch_min: float = 2.2,
-        helix_pitch_max: float = 3.6,
-        sheet_strands_min: int = 2,
-        sheet_strands_max: int = 4,
-        sheet_spacing_min: float = 2.0,
-        sheet_spacing_max: float = 2.8,
+        helix_radius_min: float = 1.6,
+        helix_radius_max: float = 2.6,
+        helix_pitch_min: float = 2.8,
+        helix_pitch_max: float = 4.4,
+        alpha_helix_radius_scale: float = 1.35,
+        alpha_helix_pitch_scale: float = 1.35,
+        sheet_run_length_min: int = 4,
+        sheet_run_length_max: int = 8,
+        sheet_turn_step: int = 1,
         junction_angle_min_deg: float = 40.0,
         descriptor_neighborhood_radius: float = 2.5,
         tau_straight: float = 0.35,
@@ -90,10 +91,11 @@ class LegoDeterministicEngine:
             helix_radius_max=float(helix_radius_max),
             helix_pitch_min=float(helix_pitch_min),
             helix_pitch_max=float(helix_pitch_max),
-            sheet_strands_min=int(max(2, sheet_strands_min)),
-            sheet_strands_max=int(max(sheet_strands_min, sheet_strands_max)),
-            sheet_spacing_min=float(sheet_spacing_min),
-            sheet_spacing_max=float(sheet_spacing_max),
+            alpha_helix_radius_scale=float(max(1.0, alpha_helix_radius_scale)),
+            alpha_helix_pitch_scale=float(max(1.0, alpha_helix_pitch_scale)),
+            sheet_run_length_min=int(max(2, sheet_run_length_min)),
+            sheet_run_length_max=int(max(sheet_run_length_min, sheet_run_length_max)),
+            sheet_turn_step=int(max(1, sheet_turn_step)),
             junction_angle_min_deg=float(junction_angle_min_deg),
             position_noise_std=float(max(0.0, position_noise_std)),
         )
@@ -123,6 +125,8 @@ class LegoDeterministicEngine:
             helix_phase_period=self.helix_phase_period,
             neighborhood_radius=self.descriptor_neighborhood_radius,
         )
+        descriptors["sheet_turn_mask"] = np.asarray(getattr(scaffold, "turn_mask", np.zeros((pos.shape[0],), dtype=bool)), dtype=bool)
+        descriptors["sheet_segment_id"] = np.asarray(getattr(scaffold, "segment_id", np.full((pos.shape[0],), fill_value=-1, dtype=np.int32)), dtype=np.int32)
 
         role_id, role_name = assign_roles(
             parent_id=parent_id,
@@ -146,6 +150,8 @@ class LegoDeterministicEngine:
             shape_noise_scale=self.shape_noise_scale,
             rng=rng,
         )
+        requested_block_types = np.asarray(shape_payload["requested_block_types"])
+        requested_rotations = np.asarray(shape_payload["requested_rotations"], dtype=np.float32)
         anchors = np.asarray(shape_payload["anchors"], dtype=np.float32)
         brick_types = np.asarray(shape_payload["brick_types"])
         brick_rotations = np.asarray(shape_payload["brick_rotations"], dtype=np.float32)
@@ -195,8 +201,8 @@ class LegoDeterministicEngine:
             "role_id": role_id.astype(np.int32),
             "role": np.asarray(role_name),
             "color_class": np.asarray(color_class, dtype=np.int32),
-            "requested_block_types": np.asarray(shape_payload["requested_block_types"]),
-            "requested_rotations": np.asarray(shape_payload["requested_rotations"], dtype=np.float32),
+            "requested_block_types": requested_block_types,
+            "requested_rotations": requested_rotations,
             "local_frames": np.asarray(shape_payload["local_frames"], dtype=np.float32),
             "descriptor_tangent": np.asarray(descriptors["tangent"], dtype=np.float32),
             "descriptor_curvature": np.asarray(descriptors["curvature_mag"], dtype=np.float32),
@@ -205,6 +211,8 @@ class LegoDeterministicEngine:
             "descriptor_phase_index": np.asarray(descriptors["phase_index"], dtype=np.int32),
             "descriptor_boundary_flag": np.asarray(descriptors["boundary_flag"], dtype=bool),
             "descriptor_junction_flag": np.asarray(descriptors["junction_flag"], dtype=bool),
+            "sheet_turn_mask": np.asarray(getattr(scaffold, "turn_mask", np.zeros((pos.shape[0],), dtype=bool)), dtype=bool),
+            "sheet_segment_id": np.asarray(getattr(scaffold, "segment_id", np.full((pos.shape[0],), fill_value=-1, dtype=np.int32)), dtype=np.int32),
         }
 
         validation = validate_sample(
@@ -252,14 +260,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bifurcation-probability", type=float, default=0.45)
     parser.add_argument("--chain-helix-probability", type=float, default=0.45)
     parser.add_argument("--chain-curved-probability", type=float, default=0.30)
-    parser.add_argument("--helix-radius-min", type=float, default=1.2)
-    parser.add_argument("--helix-radius-max", type=float, default=2.0)
-    parser.add_argument("--helix-pitch-min", type=float, default=2.2)
-    parser.add_argument("--helix-pitch-max", type=float, default=3.6)
-    parser.add_argument("--sheet-strands-min", type=int, default=2)
-    parser.add_argument("--sheet-strands-max", type=int, default=4)
-    parser.add_argument("--sheet-spacing-min", type=float, default=2.0)
-    parser.add_argument("--sheet-spacing-max", type=float, default=2.8)
+    parser.add_argument("--helix-radius-min", type=float, default=1.6)
+    parser.add_argument("--helix-radius-max", type=float, default=2.6)
+    parser.add_argument("--helix-pitch-min", type=float, default=2.8)
+    parser.add_argument("--helix-pitch-max", type=float, default=4.4)
+    parser.add_argument("--alpha-helix-radius-scale", type=float, default=1.35)
+    parser.add_argument("--alpha-helix-pitch-scale", type=float, default=1.35)
+    parser.add_argument("--sheet-run-length-min", type=int, default=4)
+    parser.add_argument("--sheet-run-length-max", type=int, default=8)
+    parser.add_argument("--sheet-turn-step", type=int, default=1)
     parser.add_argument("--junction-angle-min-deg", type=float, default=40.0)
     parser.add_argument("--descriptor-neighborhood-radius", type=float, default=2.5)
     parser.add_argument("--tau-straight", type=float, default=0.35)
@@ -289,10 +298,11 @@ def main() -> None:
         helix_radius_max=args.helix_radius_max,
         helix_pitch_min=args.helix_pitch_min,
         helix_pitch_max=args.helix_pitch_max,
-        sheet_strands_min=args.sheet_strands_min,
-        sheet_strands_max=args.sheet_strands_max,
-        sheet_spacing_min=args.sheet_spacing_min,
-        sheet_spacing_max=args.sheet_spacing_max,
+        alpha_helix_radius_scale=args.alpha_helix_radius_scale,
+        alpha_helix_pitch_scale=args.alpha_helix_pitch_scale,
+        sheet_run_length_min=args.sheet_run_length_min,
+        sheet_run_length_max=args.sheet_run_length_max,
+        sheet_turn_step=args.sheet_turn_step,
         junction_angle_min_deg=args.junction_angle_min_deg,
         descriptor_neighborhood_radius=args.descriptor_neighborhood_radius,
         tau_straight=args.tau_straight,

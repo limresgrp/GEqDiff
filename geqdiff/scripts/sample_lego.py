@@ -31,6 +31,17 @@ STATE_FIELD_SPECS = (
     ("dipole_direction", "dipole_direction_velocity"),
 )
 
+FIELD_ALIASES = {
+    "pos": "pos",
+    "position": "pos",
+    "positions": "pos",
+    "shape": "shape_features",
+    "shape_features": "shape_features",
+    "dipole": "dipole_direction",
+    "dipoles": "dipole_direction",
+    "dipole_direction": "dipole_direction",
+}
+
 
 def _default_noise_like(
     field_name: str,
@@ -210,7 +221,47 @@ def parse_args() -> argparse.Namespace:
         default=2048,
         help="Maximum number of candidates used by `input_knn` shape decoding.",
     )
+    parser.add_argument(
+        "--skip-diffusion-fields",
+        type=str,
+        nargs="*",
+        default=None,
+        help=(
+            "Optional fields to keep fixed at ground truth even if the checkpoint predicts them. "
+            "Accepted values: pos/position, shape/shape_features, dipole/dipole_direction. "
+            "Supports comma-separated and/or space-separated input."
+        ),
+    )
     return parser.parse_args()
+
+
+def _normalize_skip_field_tokens(raw_tokens: Sequence[str] | None) -> List[str]:
+    if raw_tokens is None:
+        return []
+    tokens: List[str] = []
+    for raw in raw_tokens:
+        for part in str(raw).split(","):
+            token = part.strip().lower()
+            if token != "":
+                tokens.append(token)
+    canonical: List[str] = []
+    for token in tokens:
+        field = FIELD_ALIASES.get(token)
+        if field is None:
+            allowed = ", ".join(sorted(FIELD_ALIASES.keys()))
+            raise ValueError(
+                f"Unsupported value in --skip-diffusion-fields: '{token}'. Allowed aliases: {allowed}."
+            )
+        canonical.append(field)
+    # preserve order but deduplicate
+    seen = set()
+    out: List[str] = []
+    for field in canonical:
+        if field in seen:
+            continue
+        seen.add(field)
+        out.append(field)
+    return out
 
 
 def infer_model_tmax(config: Dict) -> int | None:
@@ -1388,6 +1439,22 @@ def main(args: argparse.Namespace | None = None) -> None:
     validate_flow_checkpoint_config(config)
     corrupt_field_settings = infer_corrupt_field_settings(config)
     corrupt_field_map = infer_corrupt_field_map(config)
+    available_fields = list(corrupt_field_map.keys())
+    skip_fields = _normalize_skip_field_tokens(args.skip_diffusion_fields)
+    skipped_available_fields = [field for field in skip_fields if field in corrupt_field_map]
+    skipped_unavailable_fields = [field for field in skip_fields if field not in corrupt_field_map]
+    if skipped_unavailable_fields:
+        print(
+            "Requested skip fields not predicted by this checkpoint; ignoring: "
+            + ", ".join(skipped_unavailable_fields)
+        )
+    for field in skipped_available_fields:
+        corrupt_field_map.pop(field, None)
+    active_fields = list(corrupt_field_map.keys())
+    if len(skipped_available_fields) > 0:
+        print("Skipping diffusion for fields: " + ", ".join(skipped_available_fields))
+    print("Checkpoint-declared diffused fields: " + (", ".join(available_fields) if available_fields else "<none>"))
+    print("Active diffused fields for this run: " + (", ".join(active_fields) if active_fields else "<none>"))
 
     try:
         r_max = float(config[AtomicDataDict.R_MAX_KEY])
@@ -1465,6 +1532,9 @@ def main(args: argparse.Namespace | None = None) -> None:
             clash_guidance_auto_scale_min=float(args.clash_guidance_auto_scale_min),
             clash_guidance_auto_scale_max=float(args.clash_guidance_auto_scale_max),
         )
+        sample["sampling_available_diffused_fields"] = np.asarray(available_fields, dtype=object)
+        sample["sampling_active_diffused_fields"] = np.asarray(active_fields, dtype=object)
+        sample["sampling_skipped_diffused_fields"] = np.asarray(skipped_available_fields, dtype=object)
         sample["conditioning_example_index"] = np.asarray(example_index, dtype=np.int64)
         samples.append(enrich_from_canonical_source(sample, source_samples=source_samples))
 

@@ -15,18 +15,22 @@ except ModuleNotFoundError:  # pragma: no cover
 ROLE_TO_BLOCK_TYPE: Dict[str, str] = {
     "CAP_START": "1x1",
     "CAP_END": "1x1",
+    # Chain/loop simplification:
+    # - straight chain regions use 1x1 in-between periodic T blocks
+    # - turns/loops use L-shape
     "STRAIGHT": "1x1",
-    "BEND_LEFT": "1x1",
-    "BEND_RIGHT": "1x1",
+    "BEND_LEFT": "L-shape",
+    "BEND_RIGHT": "L-shape",
     "PLANAR": "1x2",
     "SHEET_EDGE": "1x1",
-    "JUNCTION_T": "T-shape",
-    "JUNCTION_BRANCH_LEFT": "1x1",
-    "JUNCTION_BRANCH_RIGHT": "1x1",
-    "HELIX_PHASE_0": "L-shape",
-    "HELIX_PHASE_1": "1x2",
-    "HELIX_PHASE_2": "L-shape",
-    "HELIX_PHASE_3": "1x2",
+    "JUNCTION_T": "1x1",
+    "JUNCTION_BRANCH_LEFT": "T-shape",
+    "JUNCTION_BRANCH_RIGHT": "T-shape",
+    # Alpha-helix simplification: use only compact/regular primitives.
+    "HELIX_PHASE_0": "1x2",
+    "HELIX_PHASE_1": "1x1",
+    "HELIX_PHASE_2": "1x2",
+    "HELIX_PHASE_3": "1x1",
 }
 
 ROLE_TO_PROTOTYPE: Dict[str, str] = {
@@ -37,13 +41,13 @@ ROLE_TO_PROTOTYPE: Dict[str, str] = {
     "BEND_RIGHT": "corner",
     "PLANAR": "plate",
     "SHEET_EDGE": "plate",
-    "JUNCTION_T": "tjunction",
-    "JUNCTION_BRANCH_LEFT": "rod",
-    "JUNCTION_BRANCH_RIGHT": "rod",
+    "JUNCTION_T": "cap",
+    "JUNCTION_BRANCH_LEFT": "tjunction",
+    "JUNCTION_BRANCH_RIGHT": "tjunction",
     "HELIX_PHASE_0": "rod",
-    "HELIX_PHASE_1": "corner",
+    "HELIX_PHASE_1": "cap",
     "HELIX_PHASE_2": "rod",
-    "HELIX_PHASE_3": "corner",
+    "HELIX_PHASE_3": "cap",
 }
 
 PROTOTYPE_LOCAL_POINTS: Dict[str, np.ndarray] = {
@@ -115,10 +119,52 @@ def _build_local_frame(
     bend_axis: np.ndarray,
     branch_local_normal: np.ndarray,
 ) -> np.ndarray:
+    role_name = str(role_name)
     x = _normalize(tangent)
     if float(np.linalg.norm(x)) <= 1e-8:
         x = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
-    role_name = str(role_name)
+
+    if role_name.startswith("HELIX_PHASE_"):
+        # Helix-specific deterministic frame:
+        # - z axis follows tangent (helix axis direction),
+        # - x axis is a phase-cycled radial/azimuthal direction around tangent.
+        # This keeps periodic orientation while avoiding elongation along the chain.
+        z = x
+        radial = _normalize(branch_local_normal)
+        radial = radial - float(np.dot(radial, z)) * z
+        radial = _normalize(radial)
+        if float(np.linalg.norm(radial)) <= 1e-8:
+            radial = _normalize(np.cross(z, np.asarray([0.0, 0.0, 1.0], dtype=np.float32)))
+        if float(np.linalg.norm(radial)) <= 1e-8:
+            radial = _normalize(np.cross(z, np.asarray([0.0, 1.0, 0.0], dtype=np.float32)))
+        azimuth = _normalize(np.cross(z, radial))
+        phase = 0
+        try:
+            phase = int(role_name.split("_")[-1]) % 4
+        except (ValueError, IndexError):
+            phase = 0
+        cycle = (radial, azimuth, -radial, -azimuth)
+        xh = _normalize(cycle[phase])
+        yh = _normalize(np.cross(z, xh))
+        frame = np.stack([xh, yh, z], axis=1).astype(np.float32)
+        return frame.astype(np.float32)
+
+    if role_name in {"JUNCTION_BRANCH_LEFT", "JUNCTION_BRANCH_RIGHT"}:
+        # Chain periodic T-shape orientation (up/down alternation).
+        z = x
+        radial = _normalize(branch_local_normal)
+        radial = radial - float(np.dot(radial, z)) * z
+        radial = _normalize(radial)
+        if float(np.linalg.norm(radial)) <= 1e-8:
+            radial = _normalize(np.cross(z, np.asarray([0.0, 0.0, 1.0], dtype=np.float32)))
+        if float(np.linalg.norm(radial)) <= 1e-8:
+            radial = _normalize(np.cross(z, np.asarray([0.0, 1.0, 0.0], dtype=np.float32)))
+        if role_name == "JUNCTION_BRANCH_RIGHT":
+            radial = -radial
+        y = _normalize(np.cross(z, radial))
+        frame = np.stack([radial, y, z], axis=1).astype(np.float32)
+        return frame.astype(np.float32)
+
     if role_name in {"PLANAR", "SHEET_EDGE"}:
         y_guess = _normalize(branch_local_normal)
     elif role_name in {"BEND_LEFT", "BEND_RIGHT"}:

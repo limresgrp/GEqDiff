@@ -85,24 +85,6 @@ def polyline_to_connected_voxels(points: np.ndarray) -> np.ndarray:
     return np.asarray(unique, dtype=np.int32)
 
 
-def _sample_random_rotation(rng: np.random.Generator) -> np.ndarray:
-    axis = _normalize(rng.normal(size=(3,)).astype(np.float32))
-    if float(np.linalg.norm(axis)) <= 1e-8:
-        axis = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
-    theta = float(rng.uniform(-math.pi, math.pi))
-    x, y, z = axis.tolist()
-    K = np.asarray(
-        [
-            [0.0, -z, y],
-            [z, 0.0, -x],
-            [-y, x, 0.0],
-        ],
-        dtype=np.float32,
-    )
-    I = np.eye(3, dtype=np.float32)
-    return (I + math.sin(theta) * K + (1.0 - math.cos(theta)) * (K @ K)).astype(np.float32)
-
-
 @dataclass
 class Scaffold:
     pos: np.ndarray
@@ -114,6 +96,8 @@ class Scaffold:
     family: str
     branch_kind: np.ndarray
     hidden_label: np.ndarray
+    turn_mask: np.ndarray
+    segment_id: np.ndarray
 
 
 class ScaffoldSampler:
@@ -130,10 +114,11 @@ class ScaffoldSampler:
         helix_radius_max: float = 2.0,
         helix_pitch_min: float = 2.2,
         helix_pitch_max: float = 3.6,
-        sheet_strands_min: int = 2,
-        sheet_strands_max: int = 4,
-        sheet_spacing_min: float = 2.0,
-        sheet_spacing_max: float = 2.8,
+        alpha_helix_radius_scale: float = 1.35,
+        alpha_helix_pitch_scale: float = 1.35,
+        sheet_run_length_min: int = 4,
+        sheet_run_length_max: int = 8,
+        sheet_turn_step: int = 1,
         junction_angle_min_deg: float = 40.0,
         position_noise_std: float = 0.07,
     ) -> None:
@@ -148,10 +133,11 @@ class ScaffoldSampler:
         self.helix_radius_max = float(max(helix_radius_min, helix_radius_max))
         self.helix_pitch_min = float(min(helix_pitch_min, helix_pitch_max))
         self.helix_pitch_max = float(max(helix_pitch_min, helix_pitch_max))
-        self.sheet_strands_min = int(max(2, min(sheet_strands_min, sheet_strands_max)))
-        self.sheet_strands_max = int(max(self.sheet_strands_min, sheet_strands_max))
-        self.sheet_spacing_min = float(min(sheet_spacing_min, sheet_spacing_max))
-        self.sheet_spacing_max = float(max(sheet_spacing_min, sheet_spacing_max))
+        self.alpha_helix_radius_scale = float(max(1.0, alpha_helix_radius_scale))
+        self.alpha_helix_pitch_scale = float(max(1.0, alpha_helix_pitch_scale))
+        self.sheet_run_length_min = int(max(2, min(sheet_run_length_min, sheet_run_length_max)))
+        self.sheet_run_length_max = int(max(self.sheet_run_length_min, sheet_run_length_max))
+        self.sheet_turn_step = int(max(1, sheet_turn_step))
         self.junction_angle_min_rad = float(np.deg2rad(max(5.0, junction_angle_min_deg)))
         self.position_noise_std = float(max(0.0, position_noise_std))
         if self.family not in {"mixed", "chain", "sheet", "alpha_helix"}:
@@ -174,6 +160,7 @@ class ScaffoldSampler:
         n_points: int,
         rng: np.random.Generator,
         force_regime: str | None = None,
+        helix_handedness: float | None = None,
     ) -> Tuple[np.ndarray, str]:
         n_points = int(max(8, n_points))
         if force_regime is not None:
@@ -190,9 +177,16 @@ class ScaffoldSampler:
         if regime == "helix":
             radius = float(rng.uniform(self.helix_radius_min, self.helix_radius_max))
             pitch_turn = float(rng.uniform(self.helix_pitch_min, self.helix_pitch_max))
+            if force_regime == "helix" and helix_handedness is not None:
+                # Alpha-helix-only family defaults should be larger/sparser.
+                radius *= self.alpha_helix_radius_scale
+                pitch_turn *= self.alpha_helix_pitch_scale
             turns = float(max(1.0, n_points / 8.0))
             theta = np.linspace(0.0, 2.0 * math.pi * turns, n_points, dtype=np.float32)
-            handedness = -1.0 if float(rng.random()) < 0.5 else 1.0
+            if helix_handedness is None:
+                handedness = -1.0 if float(rng.random()) < 0.5 else 1.0
+            else:
+                handedness = -1.0 if float(helix_handedness) < 0.0 else 1.0
             points = np.stack(
                 [
                     radius * np.cos(handedness * theta),
@@ -215,57 +209,62 @@ class ScaffoldSampler:
                 axis=-1,
             ).astype(np.float32)
         else:
-            t = np.linspace(0.0, 1.0, n_points, dtype=np.float32)
+            # Use integer-spaced points so voxelization preserves node count.
+            x = np.arange(n_points, dtype=np.float32)
             points = np.stack(
                 [
-                    10.0 * t,
-                    0.35 * np.sin(2.0 * math.pi * t),
-                    0.20 * np.sin(4.0 * math.pi * t + 0.4),
+                    x,
+                    np.zeros_like(x),
+                    np.zeros_like(x),
                 ],
                 axis=-1,
             ).astype(np.float32)
         return points.astype(np.float32), regime
 
     def _sample_sheet_polyline(self, n_points: int, rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
+        # Simplified sheet generator: connected 3D serpentine line with explicit turns.
         n_points = int(max(12, n_points))
-        n_strands = int(rng.integers(self.sheet_strands_min, self.sheet_strands_max + 1))
-        spacing = float(rng.uniform(self.sheet_spacing_min, self.sheet_spacing_max))
-        loop_n = max(4, n_points // (4 * n_strands))
-        strand_total = max(n_points - (n_strands - 1) * loop_n, n_strands * 4)
-        base_len = strand_total // n_strands
-        strand_lengths = [base_len] * n_strands
-        for extra in range(strand_total - base_len * n_strands):
-            strand_lengths[extra % n_strands] += 1
-        length = float(rng.uniform(8.0, 12.0))
-        pleat = float(rng.uniform(0.2, 0.45))
+        run_min = int(self.sheet_run_length_min)
+        run_max = int(self.sheet_run_length_max)
+        turn_step = int(self.sheet_turn_step)
 
-        pieces: List[np.ndarray] = []
-        labels: List[np.ndarray] = []
-        prev = None
-        for strand_idx, length_i in enumerate(strand_lengths):
-            x = np.linspace(-0.5 * length, 0.5 * length, int(length_i), dtype=np.float32)
-            if strand_idx % 2 == 1:
-                x = x[::-1]
-            y = np.full_like(x, fill_value=float(strand_idx) * spacing)
-            z = pleat * np.cos(np.arange(int(length_i), dtype=np.float32) * math.pi).astype(np.float32)
-            strand = np.stack([x, y, z], axis=-1).astype(np.float32)
-            if prev is not None:
-                start = prev[-1]
-                end = strand[0]
-                mid = 0.5 * (start + end) + np.asarray([0.0, 0.0, float(rng.uniform(0.6, 1.2))], dtype=np.float32)
-                loop = _resample_polyline(np.stack([start, mid, end], axis=0).astype(np.float32), loop_n)
-                if loop.shape[0] > 2:
-                    pieces.append(loop[1:-1].astype(np.float32))
-                    labels.append(np.full((loop.shape[0] - 2,), fill_value=-1, dtype=np.int32))
-            pieces.append(strand.astype(np.float32))
-            labels.append(np.full((strand.shape[0],), fill_value=int(strand_idx), dtype=np.int32))
-            prev = strand
-        raw_points = np.concatenate(pieces, axis=0).astype(np.float32)
-        raw_labels = np.concatenate(labels, axis=0).astype(np.int32)
-        points = _resample_polyline(raw_points, n_points)
-        nearest = np.argmin(np.sum((points[:, None, :] - raw_points[None, :, :]) ** 2, axis=-1), axis=1)
-        strand_labels = raw_labels[nearest].astype(np.int32)
-        return points.astype(np.float32), strand_labels
+        current = np.asarray([0, 0, 0], dtype=np.int32)
+        current_axis = 0
+        current_sign = 1
+        line_id = 0
+        points: List[np.ndarray] = [current.copy()]
+        labels: List[int] = [line_id]
+        turns: List[bool] = [False]
+
+        while len(points) < n_points:
+            run_len = int(rng.integers(run_min, run_max + 1))
+            for _ in range(run_len):
+                if len(points) >= n_points:
+                    break
+                step = np.zeros((3,), dtype=np.int32)
+                step[current_axis] = current_sign
+                current = current + step
+                points.append(current.copy())
+                labels.append(line_id)
+                turns.append(False)
+            if len(points) >= n_points:
+                break
+            remaining_axes = [axis for axis in (0, 1, 2) if axis != current_axis]
+            turn_axis = int(remaining_axes[int(rng.integers(0, len(remaining_axes)))])
+            turn_sign = -1 if float(rng.random()) < 0.5 else 1
+            current = current + np.eye(3, dtype=np.int32)[turn_axis] * int(turn_sign * turn_step)
+            points.append(current.copy())
+            labels.append(-1)
+            turns.append(True)
+            next_axis = [axis for axis in (0, 1, 2) if axis not in {current_axis, turn_axis}]
+            current_axis = int(next_axis[0]) if len(next_axis) == 1 else int(next_axis[int(rng.integers(0, len(next_axis)))])
+            current_sign = -current_sign if float(rng.random()) < 0.5 else current_sign
+            line_id += 1
+
+        raw_points = np.asarray(points[:n_points], dtype=np.float32)
+        raw_labels = np.asarray(labels[:n_points], dtype=np.int32)
+        raw_turns = np.asarray(turns[:n_points], dtype=bool)
+        return raw_points, np.stack([raw_labels, raw_turns.astype(np.int32)], axis=-1)
 
     def _build_tree_degree(self, parent_id: np.ndarray) -> np.ndarray:
         n = int(parent_id.shape[0])
@@ -282,25 +281,31 @@ class ScaffoldSampler:
             target_nodes = int(rng.integers(self.min_nodes, self.max_nodes + 1))
             family = self._choose_family(rng)
             if family in {"chain", "alpha_helix"}:
-                force_regime = "helix" if family == "alpha_helix" else None
-                requested_points = max(10, target_nodes)
+                force_regime = "helix" if family == "alpha_helix" else "straight"
+                helix_handedness = 1.0 if family == "alpha_helix" else None
                 if family == "alpha_helix":
                     # Helical curves become longer after voxel connectivity stitching;
                     # downsample control points so final connected-voxel count stays in range.
-                    requested_points = max(8, int(round(0.6 * float(target_nodes))))
+                    scale = max(1.0, float(self.alpha_helix_radius_scale) * float(self.alpha_helix_pitch_scale) ** 0.5)
+                    requested_points = max(6, int(round((0.52 / scale) * float(target_nodes))))
+                else:
+                    # Keep chain sampling direct and deterministic.
+                    requested_points = max(8, target_nodes)
                 points, regime = self._sample_chain_polyline(
                     n_points=requested_points,
                     rng=rng,
                     force_regime=force_regime,
+                    helix_handedness=helix_handedness,
                 )
-                if family != "alpha_helix":
-                    points = points @ _sample_random_rotation(rng).T
-                    if self.position_noise_std > 0.0:
-                        points = points + rng.normal(scale=self.position_noise_std, size=points.shape).astype(np.float32)
-                else:
+                if family == "alpha_helix":
                     # Keep alpha-helix axes stable in lattice space; random full rotations
                     # inflate Manhattan path length and make node counts unstable.
                     mild_noise = min(self.position_noise_std, 0.03)
+                    if mild_noise > 0.0:
+                        points = points + rng.normal(scale=mild_noise, size=points.shape).astype(np.float32)
+                else:
+                    # Keep chain motifs stable and connected for the periodic T/1x1 program.
+                    mild_noise = min(self.position_noise_std, 0.02)
                     if mild_noise > 0.0:
                         points = points + rng.normal(scale=mild_noise, size=points.shape).astype(np.float32)
                 vox = polyline_to_connected_voxels(points)
@@ -328,24 +333,32 @@ class ScaffoldSampler:
                     family=family,
                     branch_kind=branch_kind.astype(str),
                     hidden_label=hidden.astype(str),
+                    turn_mask=np.zeros((n,), dtype=bool),
+                    segment_id=np.full((n,), fill_value=-1, dtype=np.int32),
                 )
             if family == "sheet":
-                requested_points = max(10, int(round(0.75 * float(target_nodes))))
-                points, strand_labels = self._sample_sheet_polyline(n_points=requested_points, rng=rng)
-                points = points @ _sample_random_rotation(rng).T
-                if self.position_noise_std > 0.0:
-                    points = points + rng.normal(scale=self.position_noise_std, size=points.shape).astype(np.float32)
+                requested_points = max(10, target_nodes)
+                points, sheet_meta = self._sample_sheet_polyline(n_points=requested_points, rng=rng)
+                # Keep simplified sheets axis-aligned and low-noise to preserve
+                # deterministic 1D line semantics with sparse turns.
+                mild_noise = min(self.position_noise_std, 0.02)
+                if mild_noise > 0.0:
+                    points = points + rng.normal(scale=mild_noise, size=points.shape).astype(np.float32)
                 vox = polyline_to_connected_voxels(points)
                 if not (self.min_nodes <= int(vox.shape[0]) <= self.max_nodes):
                     continue
                 n = int(vox.shape[0])
                 parent = np.full((n,), fill_value=-1, dtype=np.int32)
                 parent[1:] = np.arange(0, n - 1, dtype=np.int32)
+                nearest = np.argmin(np.sum((vox[:, None, :] - points[None, :, :]) ** 2, axis=-1), axis=1)
+                raw_segment = sheet_meta[:, 0]
+                raw_turn = sheet_meta[:, 1].astype(bool)
                 branch_id = np.zeros((n,), dtype=np.int32)
                 seq_index = np.arange(n, dtype=np.int32)
+                turn_mask = np.asarray(raw_turn[nearest], dtype=bool)
+                segment_id = np.asarray(raw_segment[nearest], dtype=np.int32)
                 degree = self._build_tree_degree(parent)
-                nearest = np.argmin(np.sum((vox[:, None, :] - points[None, :, :]) ** 2, axis=-1), axis=1)
-                hidden = np.asarray(strand_labels[nearest].tolist(), dtype=np.int32)
+                hidden = np.asarray(raw_segment[nearest].tolist(), dtype=np.int32)
                 return Scaffold(
                     pos=vox.astype(np.float32),
                     node_id=np.arange(n, dtype=np.int32),
@@ -356,5 +369,7 @@ class ScaffoldSampler:
                     family=family,
                     branch_kind=np.asarray(["sheet"] * n, dtype=str),
                     hidden_label=hidden.astype(np.int32),
+                    turn_mask=turn_mask.astype(bool),
+                    segment_id=segment_id.astype(np.int32),
                 )
         raise RuntimeError("Failed to sample a valid scaffold after multiple attempts.")

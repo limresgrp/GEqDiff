@@ -31,6 +31,12 @@ from lego.utils import default_dataset_path, load_samples
 
 LIGAND_UNKNOWN_TYPE_NAME = "ligand_unknown"
 DIRECTION_VALID_EPS = 1e-6
+BRANCH_KIND_TO_ID = {
+    "chain": 0,
+    "helix": 1,
+    "sheet": 2,
+    "unknown": 3,
+}
 
 
 def _adjacency_from_contact_pairs(num_nodes: int, contact_pairs: np.ndarray) -> List[List[int]]:
@@ -214,6 +220,7 @@ def _validate_example(example: Dict, adjacency: Sequence[Sequence[int]], split_s
     shape_l2_weight = np.asarray(example["shape_l2_weight"], dtype=np.float32)
     shape_l3_weight = np.asarray(example["shape_l3_weight"], dtype=np.float32)
     dipole_direction_weight = np.asarray(example["dipole_direction_weight"], dtype=np.float32)
+    branch_kind = np.asarray(example["branch_kind"], dtype=np.int64)
     edge_index = np.asarray(example["edge_index"], dtype=np.int64)
     num_nodes = int(example["num_nodes"])
 
@@ -224,6 +231,7 @@ def _validate_example(example: Dict, adjacency: Sequence[Sequence[int]], split_s
     assert shape_equiv_features.shape == (num_nodes, 15)
     assert dipole_strength.shape == (num_nodes, 1)
     assert dipole_direction.shape == (num_nodes, 3)
+    assert branch_kind.shape == (num_nodes,)
     assert sequence_position.shape == (num_nodes, 1)
     assert shape_l1_valid.shape == (num_nodes,)
     assert shape_l2_valid.shape == (num_nodes,)
@@ -238,6 +246,8 @@ def _validate_example(example: Dict, adjacency: Sequence[Sequence[int]], split_s
     assert np.all(shape_l2_weight >= -1e-6)
     assert np.all(shape_l3_weight >= -1e-6)
     assert np.all(dipole_direction_weight >= -1e-6)
+    assert np.all(branch_kind >= 0)
+    assert np.all(branch_kind < 4)
     if split_strategy == "connected":
         assert _ligand_is_connected(ligand_mask, adjacency)
 
@@ -272,6 +282,18 @@ def _build_frame_record(sample: Dict, source_frame_id: int, type_vocab: Sequence
         sequence_pos_max = int(np.asarray(sample["sequence_pos_max"]).reshape(-1)[0])
     else:
         sequence_pos_max = int(max(pos.shape[0], 1))
+    if "branch_kind" in sample:
+        branch_kind_str = np.asarray(sample["branch_kind"]).astype(str).reshape(-1)
+        if branch_kind_str.shape[0] != pos.shape[0]:
+            raise ValueError(
+                f"Expected branch_kind length {pos.shape[0]}, got {branch_kind_str.shape[0]}."
+            )
+        branch_kind = np.asarray(
+            [BRANCH_KIND_TO_ID.get(str(kind).lower(), BRANCH_KIND_TO_ID["unknown"]) for kind in branch_kind_str.tolist()],
+            dtype=np.int64,
+        )
+    else:
+        branch_kind = np.full((pos.shape[0],), fill_value=BRANCH_KIND_TO_ID["unknown"], dtype=np.int64)
     shape_features = np.asarray(sample["brick_features"], dtype=np.float32)
     shape_scalar_features, shape_equiv_features = split_shape_irreps(shape_features)
 
@@ -307,6 +329,7 @@ def _build_frame_record(sample: Dict, source_frame_id: int, type_vocab: Sequence
         "types": types,
         "node_types_true": node_types_true,
         "sequence_position": sequence_position.astype(np.float32),
+        "branch_kind": branch_kind.astype(np.int64),
         "sequence_pos_max": np.int64(sequence_pos_max),
         "type_vocab": np.asarray(type_vocab),
         "shape_features_raw": shape_features,
@@ -385,6 +408,7 @@ def _build_examples_for_frame(
             "node_types": input_node_types.astype(np.int64),
             "node_types_true": frame["node_types_true"].astype(np.int64),
             "sequence_position": frame["sequence_position"].astype(np.float32),
+            "branch_kind": frame["branch_kind"].astype(np.int64),
             "shape_features_raw": frame["shape_features_raw"].astype(np.float32),
             "shape_scalar_features": frame["shape_scalar_features"].astype(np.float32),
             "shape_equiv_features": frame["shape_equiv_features"].astype(np.float32),
@@ -497,6 +521,7 @@ def _pack_examples(
     _pad_node_field(payload, "node_types", examples, max_nodes, np.int64)
     _pad_node_field(payload, "node_types_true", examples, max_nodes, np.int64)
     _pad_node_field(payload, "sequence_position", examples, max_nodes, np.float32, tail_shape=(1,))
+    _pad_node_field(payload, "branch_kind", examples, max_nodes, np.int64)
     _pad_node_field(payload, "shape_features_raw", examples, max_nodes, np.float32, tail_shape=(16,))
     _pad_node_field(payload, "shape_scalar_features", examples, max_nodes, np.float32, tail_shape=(4,))
     _pad_node_field(payload, "shape_scalar_features_raw", examples, max_nodes, np.float32, tail_shape=(4,))
