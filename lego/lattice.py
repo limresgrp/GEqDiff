@@ -22,7 +22,47 @@ if str(REPO_ROOT) not in sys.path:
 
 from lego.color_rules import assign_color_and_dipole
 from lego.lego_blocks import GRID_ROTATIONS, rotated_offsets, LEGO_LIBRARY
-from lego.utils import DEFAULT_IRREPS, default_dataset_path, save_samples, irrep_signature
+from lego.utils import DEFAULT_IRREPS, default_dataset_path, save_samples, spherical_harmonic_basis
+
+
+def _block_type_signature(block_type: str, rotation: np.ndarray) -> np.ndarray:
+    """
+    Computes a rigorous spherical harmonic signature (l_max=3) for a block.
+    Instead of heuristic prototypes, we project the exact rotated voxel offsets 
+    onto the analytical SH basis to capture exact geometric multipole moments,
+    using a high-pass filter to sharply define the shapes.
+    """
+    offsets = np.asarray(LEGO_LIBRARY[block_type]["offsets"], dtype=np.float32)
+    # Apply the discrete SO(3) rotation to the local offsets
+    rotated = (np.asarray(rotation, dtype=np.float32) @ offsets.T).T
+    
+    signature = np.zeros((16,), dtype=np.float32)
+    # The anchor voxel (0,0,0) provides the pure l=0 monopole volume.
+    # We strictly enforce 1x1 to be exactly 1.0 at the monopole level.
+    signature[0] = 1.0  
+    
+    # The protruding voxels define the higher-order shape features (l=1, 2, 3)
+    protrusions = rotated[np.linalg.norm(rotated, axis=1) > 1e-5]
+    if len(protrusions) > 0:
+        # Project protrusions onto the continuous SH basis to capture exact physical moments.
+        basis = spherical_harmonic_basis(protrusions, lmax=3)
+        
+        # MULTIPOLE BOOST (High-Pass Filter):
+        # To make the shapes "less spherical" and sharper, we scale up the higher-order
+        # harmonics. l=1 dominates the 1x2 protrusion, l=2 rigorously captures the 
+        # orthogonal L-shape corners and symmetric T-shape arms.
+        degree_weights = np.array([
+            1.0,                                      # l=0 (base volume addition)
+            2.2, 2.2, 2.2,                            # l=1 (Strong dipole for 1x2 protrusion)
+            2.8, 2.8, 2.8, 2.8, 2.8,                  # l=2 (Quadrupole for T-shape and L-shape)
+            2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0         # l=3 (Octupole edge details)
+        ], dtype=np.float32)
+        
+        # Sum over all physical protrusions and heavily amplify structural definition
+        multipoles = basis.sum(axis=0)
+        signature += degree_weights * multipoles
+        
+    return signature
 
 
 class DiscreteTurtle:
@@ -157,7 +197,8 @@ class LegoProceduralEngine:
         left_turn = True 
         
         while current_len < target_length:
-            run_length = rng.integers(3, 7)
+            # Enforce more compact runs to prevent extreme lengths
+            run_length = rng.integers(2, 5) 
             for i in range(run_length):
                 if current_len >= target_length: return True
                 
@@ -183,7 +224,8 @@ class LegoProceduralEngine:
             current_len += 1
             if current_len >= target_length: return True
             
-            gap_length = rng.integers(1, 4) 
+            # Tighter U-turns for compactness
+            gap_length = rng.integers(1, 3) 
             for _ in range(gap_length):
                 if not turtle.place_and_advance("1x1", "SHEET_EDGE", (1, 0, 0)): return False
                 current_len += 1
@@ -280,15 +322,43 @@ class LegoProceduralEngine:
             
         return True
 
+    def _generate_mixed(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
+        """
+        Alternates multi-block segments of different secondary structures 
+        to form a heterogeneous complex scaffold.
+        """
+        current_len = 0
+        
+        while current_len < target_length:
+            # Sample a chunk length for the next structural domain
+            segment_length = int(rng.integers(6, 13))
+            if current_len + segment_length > target_length:
+                segment_length = target_length - current_len
+            
+            segment_type = str(rng.choice(["chain", "sheet", "alpha_helix"], p=[0.35, 0.35, 0.30]))
+            start_nodes = len(turtle.anchors)
+            
+            # The generators will automatically sprout the new domain starting exactly
+            # from the local affine frame left behind by the previous domain.
+            if segment_type == "sheet":
+                if not self._generate_sheet(turtle, segment_length, rng): return False
+            elif segment_type == "chain":
+                if not self._generate_chain(turtle, segment_length, rng): return False
+            elif segment_type == "alpha_helix":
+                if not self._generate_alpha_helix(turtle, segment_length, rng): return False
+                
+            added = len(turtle.anchors) - start_nodes
+            if added == 0: 
+                return False # Failsafe
+            current_len += added
+            
+        return True
+
     def build_sample(self, *, rng: np.random.Generator) -> Dict:
         target_nodes = int(rng.integers(self.min_nodes, self.max_nodes + 1))
         
         for attempt in range(100):
             family = self.scaffold_family
-            if family == "mixed":
-                probs = [0.35, 0.35, 0.30]
-                family = str(rng.choice(["chain", "sheet", "alpha_helix"], p=probs))
-
             turtle = DiscreteTurtle(start_pos=np.array([0, 0, 0]))
             
             success = False
@@ -298,6 +368,8 @@ class LegoProceduralEngine:
                 success = self._generate_chain(turtle, target_nodes, rng)
             elif family == "alpha_helix":
                 success = self._generate_alpha_helix(turtle, target_nodes, rng)
+            elif family == "mixed":
+                success = self._generate_mixed(turtle, target_nodes, rng)
                 
             if success and len(turtle.anchors) >= self.min_nodes:
                 break
@@ -314,9 +386,20 @@ class LegoProceduralEngine:
             "tangent": rotations[:, :, 0],
             "branch_local_normal": rotations[:, :, 1],
             "bend_axis": rotations[:, :, 2],
-            "phase_index": np.arange(n) % 4
+            "phase_index": np.arange(n) % 4,
+            "prev_same_branch": np.concatenate([np.array([-1], dtype=np.int32), np.arange(0, n - 1, dtype=np.int32)]),
+            "next_same_branch": np.concatenate([np.arange(1, n, dtype=np.int32), np.array([-1], dtype=np.int32)]),
         }
         
+        requested_block_types = np.asarray(brick_types, dtype=object)
+        shape_features = np.asarray(
+            [
+                _block_type_signature(str(brick_types[idx]), rotations[idx]).astype(np.float32)
+                for idx in range(n)
+            ],
+            dtype=np.float32,
+        )
+
         color_class, dipoles = assign_color_and_dipole(
             role_names=role_names,
             seq_index_in_branch=np.arange(n),
@@ -325,15 +408,21 @@ class LegoProceduralEngine:
             rng=rng,
         )
 
-        shape_features = []
-        for i in range(n):
-            coeff = np.zeros(((3 + 1)**2,), dtype=np.float32)
-            coeff[0] = 1.0 
-            if self.shape_noise_scale > 0.0:
-                coeff += rng.normal(scale=self.shape_noise_scale, size=coeff.shape).astype(np.float32)
-            shape_features.append(coeff)
-            
-        shape_features = np.array(shape_features, dtype=np.float32)
+        branch_kind = np.full((n,), fill_value=str(family), dtype="<U16")
+        if family == "mixed":
+            branch_kind = np.asarray(
+                [
+                    "alpha_helix"
+                    if str(role).startswith("HELIX_PHASE_")
+                    else "sheet"
+                    if str(role) in {"PLANAR", "SHEET_EDGE", "BEND_LEFT", "BEND_RIGHT"}
+                    else "chain"
+                    if str(role) in {"STRAIGHT", "JUNCTION_BRANCH_LEFT", "JUNCTION_BRANCH_RIGHT", "JUNCTION_T"}
+                    else "mixed"
+                    for role in role_names.tolist()
+                ],
+                dtype="<U16",
+            )
 
         return {
             "coefficients": np.zeros((16,), dtype=np.float32),
@@ -351,6 +440,8 @@ class LegoProceduralEngine:
             "brick_features": shape_features,
             "brick_dipoles": dipoles,
             "role": role_names,
+            "branch_kind": branch_kind,
+            "requested_block_types": requested_block_types,
         }
 
     def generate_dataset(self, n_samples: int = 1, seed: int | None = None) -> List[Dict]:

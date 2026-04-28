@@ -35,22 +35,6 @@ def _branch_orders(branch_id: np.ndarray, seq_index_in_branch: np.ndarray) -> Di
     return orders
 
 
-def _select_spaced(order: np.ndarray, candidates: List[int], min_gap: int) -> List[int]:
-    if len(candidates) == 0:
-        return []
-    rank = {int(node): idx for idx, node in enumerate(order.tolist())}
-    selected: List[int] = []
-    for node in candidates:
-        node_i = int(node)
-        node_rank = int(rank.get(node_i, -10**9))
-        if len(selected) == 0:
-            selected.append(node_i)
-            continue
-        if all(abs(node_rank - int(rank[int(prev)])) >= int(min_gap) for prev in selected):
-            selected.append(node_i)
-    return selected
-
-
 def assign_roles(
     *,
     parent_id: np.ndarray,
@@ -66,6 +50,18 @@ def assign_roles(
     t_shape_min_gap: int = 3,
     t_shape_curvature_threshold: float = 0.60,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Assign deterministic brick roles from scaffold labels and descriptors.
+
+    This version is intentionally grammar-driven:
+
+    * sheet: explicit turn nodes are L-shapes; straight nodes alternate
+      SHEET_EDGE/PLANAR, which map to 1x1/1x2.
+    * chain: every internal node is a T-shape, alternating orientation through
+      JUNCTION_BRANCH_LEFT/JUNCTION_BRANCH_RIGHT. Curvature no longer converts
+      chain turns into L-shapes.
+    * helix: helix phase is assigned before generic planarity/curvature rules,
+      so a thin continuous helix cannot be accidentally reclassified as planar.
+    """
     parent_id = np.asarray(parent_id, dtype=np.int32).reshape(-1)
     branch_id = np.asarray(branch_id, dtype=np.int32).reshape(-1)
     seq_index_in_branch = np.asarray(seq_index_in_branch, dtype=np.int32).reshape(-1)
@@ -73,151 +69,86 @@ def assign_roles(
     degree_topology = np.asarray(degree_topology, dtype=np.int32).reshape(-1)
     n = int(parent_id.shape[0])
 
-    tangent = np.asarray(descriptors["tangent"], dtype=np.float32)
     curvature = np.asarray(descriptors["curvature_mag"], dtype=np.float32).reshape(-1)
     bend_axis = np.asarray(descriptors["bend_axis"], dtype=np.float32)
     planarity = np.asarray(descriptors["planarity_score"], dtype=np.float32).reshape(-1)
     boundary_flag = np.asarray(descriptors["boundary_flag"], dtype=bool).reshape(-1)
     branch_local_normal = np.asarray(descriptors["branch_local_normal"], dtype=np.float32)
     next_same_branch = np.asarray(descriptors["next_same_branch"], dtype=np.int32).reshape(-1)
-    sheet_turn_mask = np.asarray(descriptors.get("sheet_turn_mask", np.zeros((n,), dtype=bool)), dtype=bool).reshape(-1)
-    sheet_segment_id = np.asarray(descriptors.get("sheet_segment_id", np.full((n,), fill_value=-1, dtype=np.int32)), dtype=np.int32).reshape(-1)
+    sheet_turn_mask = np.asarray(
+        descriptors.get("sheet_turn_mask", np.zeros((n,), dtype=bool)),
+        dtype=bool,
+    ).reshape(-1)
+    sheet_segment_id = np.asarray(
+        descriptors.get("sheet_segment_id", np.full((n,), fill_value=-1, dtype=np.int32)),
+        dtype=np.int32,
+    ).reshape(-1)
 
     roles = np.full((n,), fill_value=ROLE_TO_ID["STRAIGHT"], dtype=np.int32)
-    locked = np.zeros((n,), dtype=bool)
 
-    # First-pass geometry rules.
     for node in range(n):
-        if locked[node]:
-            continue
-        if bool(boundary_flag[node]) and int(seq_index_in_branch[node]) == 0 and int(parent_id[node]) < 0:
-            roles[node] = ROLE_TO_ID["CAP_START"]
-            locked[node] = True
-            continue
-        if bool(boundary_flag[node]) and int(next_same_branch[node]) < 0:
-            roles[node] = ROLE_TO_ID["CAP_END"]
-            locked[node] = True
-            continue
-
         kind = str(branch_kind[node]).lower()
-        if kind.startswith("sheet"):
-            # Sheet program: alternating 1x1/1x2 on each straight segment.
-            # Explicit turn nodes from the generator always become L-shapes.
-            if bool(sheet_turn_mask[node]) or float(curvature[node]) >= float(tau_straight):
-                signed_bend = float(np.dot(bend_axis[node], branch_local_normal[node]))
-                roles[node] = ROLE_TO_ID["BEND_LEFT"] if signed_bend >= 0.0 else ROLE_TO_ID["BEND_RIGHT"]
+        seq = int(seq_index_in_branch[node])
+        is_start = bool(boundary_flag[node]) and seq == 0 and int(parent_id[node]) < 0
+        is_end = bool(boundary_flag[node]) and int(next_same_branch[node]) < 0
+
+        if kind.startswith("helix"):
+            # Keep endpoints compact, but make every internal helix node phase-driven.
+            if is_start:
+                roles[node] = ROLE_TO_ID["CAP_START"]
+            elif is_end:
+                roles[node] = ROLE_TO_ID["CAP_END"]
             else:
-                roles[node] = ROLE_TO_ID["STRAIGHT"]
+                phase = int(seq % int(max(1, helix_phase_period)))
+                roles[node] = ROLE_TO_ID[f"HELIX_PHASE_{phase % 4}"]
             continue
 
         if kind.startswith("chain"):
-            # Chain program: alternating T-shapes with 1x1 in-between.
-            # Odd indices host T-shapes, alternating up/down orientation labels.
-            if float(curvature[node]) >= float(tau_straight):
+            if is_start:
+                roles[node] = ROLE_TO_ID["CAP_START"]
+            elif is_end:
+                roles[node] = ROLE_TO_ID["CAP_END"]
+            else:
+                # Alternating T-up/T-down. shape_prototypes.py maps both roles to
+                # T-shape and flips the local radial axis for the RIGHT role.
+                t_index = max(0, seq - 1)
+                roles[node] = (
+                    ROLE_TO_ID["JUNCTION_BRANCH_LEFT"]
+                    if (t_index % 2 == 0)
+                    else ROLE_TO_ID["JUNCTION_BRANCH_RIGHT"]
+                )
+            continue
+
+        if kind.startswith("sheet"):
+            if bool(sheet_turn_mask[node]):
                 signed_bend = float(np.dot(bend_axis[node], branch_local_normal[node]))
                 roles[node] = ROLE_TO_ID["BEND_LEFT"] if signed_bend >= 0.0 else ROLE_TO_ID["BEND_RIGHT"]
             else:
-                seq = int(seq_index_in_branch[node])
-                if seq % 2 == 1:
-                    t_index = (seq - 1) // 2
-                    roles[node] = ROLE_TO_ID["JUNCTION_BRANCH_LEFT"] if (t_index % 2 == 0) else ROLE_TO_ID["JUNCTION_BRANCH_RIGHT"]
-                else:
-                    roles[node] = ROLE_TO_ID["STRAIGHT"]
+                # Temporary assignment; the final segment-specific pass below
+                # enforces 1x1/1x2 alternation within each straight run.
+                roles[node] = ROLE_TO_ID["SHEET_EDGE"]
             continue
 
+        # Fallback for older/mixed scaffolds.
+        if is_start:
+            roles[node] = ROLE_TO_ID["CAP_START"]
+            continue
+        if is_end:
+            roles[node] = ROLE_TO_ID["CAP_END"]
+            continue
         if float(planarity[node]) >= float(tau_planar):
-            near_branch_boundary = int(seq_index_in_branch[node]) <= 1 or int(next_same_branch[node]) < 0
+            near_branch_boundary = seq <= 1 or int(next_same_branch[node]) < 0
             roles[node] = ROLE_TO_ID["SHEET_EDGE"] if near_branch_boundary else ROLE_TO_ID["PLANAR"]
             continue
-
-        if str(branch_kind[node]).lower().startswith("helix"):
-            phase = int(seq_index_in_branch[node] % int(max(1, helix_phase_period)))
-            roles[node] = ROLE_TO_ID[f"HELIX_PHASE_{phase % 4}"]
-            continue
-
         if float(curvature[node]) < float(tau_straight):
             roles[node] = ROLE_TO_ID["STRAIGHT"]
             continue
-
         signed_bend = float(np.dot(bend_axis[node], branch_local_normal[node]))
         roles[node] = ROLE_TO_ID["BEND_LEFT"] if signed_bend >= 0.0 else ROLE_TO_ID["BEND_RIGHT"]
 
-    # Second pass deterministic regularization.
+    # Explicit sheet alternation: 1x1/1x2/1x1/1x2 along each straight segment.
     orders = _branch_orders(branch_id=branch_id, seq_index_in_branch=seq_index_in_branch)
-    protected = {
-        ROLE_TO_ID["CAP_START"],
-        ROLE_TO_ID["CAP_END"],
-    }
-
-    for branch, order in orders.items():
-        if order.size < 3:
-            continue
-        kind = str(branch_kind[int(order[0])]).lower()
-        if kind.startswith("chain") or kind.startswith("sheet"):
-            continue
-        for local_idx in range(1, int(order.size) - 1):
-            center = int(order[local_idx])
-            if roles[center] in protected:
-                continue
-            left = int(order[local_idx - 1])
-            right = int(order[local_idx + 1])
-            if roles[left] == roles[right] and roles[center] != roles[left]:
-                roles[center] = roles[left]
-
-        if kind.startswith("helix"):
-            for node in order.tolist():
-                node_i = int(node)
-                if roles[node_i] in protected:
-                    continue
-                phase = int(seq_index_in_branch[node_i] % int(max(1, helix_phase_period)))
-                roles[node_i] = ROLE_TO_ID[f"HELIX_PHASE_{phase % 4}"]
-
-    # Promote a sparse set of turn-sensitive sites to T-shape role.
-    # The label name is preserved for backward compatibility (`JUNCTION_T`),
-    # but this role is now used for helix/turn local motifs rather than graph branching.
-    min_gap = int(max(2, t_shape_min_gap))
-    curvature_thr = float(max(0.0, t_shape_curvature_threshold))
     for _, order in orders.items():
-        if order.size < 3:
-            continue
-        kind = str(branch_kind[int(order[0])]).lower()
-        # Keep helix branches strictly phase-driven so alpha-helix motifs are
-        # fully periodic and predictable from sequence index.
-        if kind.startswith("helix") or kind.startswith("chain") or kind.startswith("sheet"):
-            continue
-        ranked: List[Tuple[float, int]] = []
-        for node in order.tolist():
-            node_i = int(node)
-            if bool(boundary_flag[node_i]):
-                continue
-            if roles[node_i] in protected:
-                continue
-            if roles[node_i] not in {ROLE_TO_ID["BEND_LEFT"], ROLE_TO_ID["BEND_RIGHT"]}:
-                continue
-            if float(curvature[node_i]) < curvature_thr:
-                continue
-            score = float(curvature[node_i] + 0.25 * abs(float(np.dot(bend_axis[node_i], branch_local_normal[node_i]))))
-            ranked.append((score, node_i))
-
-        if len(ranked) == 0:
-            continue
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        ordered_candidates = [int(node) for _, node in ranked]
-        selected = _select_spaced(order=order, candidates=ordered_candidates, min_gap=min_gap)
-        # Keep density bounded for readability and to avoid overusing T-shapes.
-        max_t = int(max(1, order.size // 6))
-        for node_i in selected[:max_t]:
-            roles[int(node_i)] = ROLE_TO_ID["JUNCTION_T"]
-
-    # Compatibility guard: if a dataset still contains high-degree nodes,
-    # force those nodes to the same historical role.
-    junction_nodes = np.flatnonzero(degree_topology >= int(max(2, junction_degree_threshold))).astype(np.int32)
-    for node in junction_nodes.tolist():
-        roles[int(node)] = ROLE_TO_ID["JUNCTION_T"]
-
-    # Final sheet-specific alternation pass. Straight nodes alternate 1x1/1x2
-    # within each segment, while explicit turn nodes remain L-shapes.
-    for branch, order in orders.items():
         if order.size < 2:
             continue
         kind = str(branch_kind[int(order[0])]).lower()
@@ -240,5 +171,13 @@ def assign_roles(
                 roles[idx] = ROLE_TO_ID["SHEET_EDGE"] if (parity % 2 == 0) else ROLE_TO_ID["PLANAR"]
                 parity += 1
 
-    role_names = np.asarray([ROLE_NAMES[int(role_id)] for role_id in roles.tolist()], dtype=f"<U{max(len(x) for x in ROLE_NAMES)}")
+    # Compatibility guard for legacy branching topologies.
+    junction_nodes = np.flatnonzero(degree_topology >= int(max(2, junction_degree_threshold))).astype(np.int32)
+    for node in junction_nodes.tolist():
+        roles[int(node)] = ROLE_TO_ID["JUNCTION_T"]
+
+    role_names = np.asarray(
+        [ROLE_NAMES[int(role_id)] for role_id in roles.tolist()],
+        dtype=f"<U{max(len(x) for x in ROLE_NAMES)}",
+    )
     return roles.astype(np.int32), role_names

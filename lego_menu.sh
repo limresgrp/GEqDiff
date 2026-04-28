@@ -26,19 +26,6 @@ DEFAULT_SOURCE_SAMPLES=""
 DEFAULT_SCAFFOLD_FAMILY=""
 DEFAULT_MIN_NODES=""
 DEFAULT_MAX_NODES=""
-DEFAULT_HELIX_RADIUS_MIN=""
-DEFAULT_HELIX_RADIUS_MAX=""
-DEFAULT_HELIX_PITCH_MIN=""
-DEFAULT_HELIX_PITCH_MAX=""
-DEFAULT_ALPHA_HELIX_RADIUS_SCALE=""
-DEFAULT_ALPHA_HELIX_PITCH_SCALE=""
-DEFAULT_SHEET_RUN_LENGTH_MIN=""
-DEFAULT_SHEET_RUN_LENGTH_MAX=""
-DEFAULT_SHEET_TURN_STEP=""
-DEFAULT_POSITION_NOISE_STD=""
-DEFAULT_SEQUENCE_POS_MAX=""
-DEFAULT_SHAPE_NOISE_SCALE=""
-DEFAULT_DIPOLE_NOISE_SCALE=""
 
 apply_standard_scaffold_preset() {
   CURRENT_PRESET_LABEL="standard-scaffold"
@@ -51,19 +38,6 @@ apply_standard_scaffold_preset() {
   DEFAULT_SCAFFOLD_FAMILY="mixed"
   DEFAULT_MIN_NODES="18"
   DEFAULT_MAX_NODES="40"
-  DEFAULT_HELIX_RADIUS_MIN="1.6"
-  DEFAULT_HELIX_RADIUS_MAX="2.6"
-  DEFAULT_HELIX_PITCH_MIN="2.8"
-  DEFAULT_HELIX_PITCH_MAX="4.4"
-  DEFAULT_ALPHA_HELIX_RADIUS_SCALE="1.35"
-  DEFAULT_ALPHA_HELIX_PITCH_SCALE="1.35"
-  DEFAULT_SHEET_RUN_LENGTH_MIN="8"
-  DEFAULT_SHEET_RUN_LENGTH_MAX="12"
-  DEFAULT_SHEET_TURN_STEP="3"
-  DEFAULT_POSITION_NOISE_STD="0.0"
-  DEFAULT_SEQUENCE_POS_MAX=""
-  DEFAULT_SHAPE_NOISE_SCALE="0.0"
-  DEFAULT_DIPOLE_NOISE_SCALE="0.0"
 }
 
 apply_tiny_scaffold_preset() {
@@ -77,19 +51,6 @@ apply_tiny_scaffold_preset() {
   DEFAULT_SCAFFOLD_FAMILY="mixed"
   DEFAULT_MIN_NODES="10"
   DEFAULT_MAX_NODES="16"
-  DEFAULT_HELIX_RADIUS_MIN="1.4"
-  DEFAULT_HELIX_RADIUS_MAX="2.2"
-  DEFAULT_HELIX_PITCH_MIN="2.4"
-  DEFAULT_HELIX_PITCH_MAX="3.8"
-  DEFAULT_ALPHA_HELIX_RADIUS_SCALE="1.30"
-  DEFAULT_ALPHA_HELIX_PITCH_SCALE="1.30"
-  DEFAULT_SHEET_RUN_LENGTH_MIN="8"
-  DEFAULT_SHEET_RUN_LENGTH_MAX="12"
-  DEFAULT_SHEET_TURN_STEP="3"
-  DEFAULT_POSITION_NOISE_STD="0.0"
-  DEFAULT_SEQUENCE_POS_MAX=""
-  DEFAULT_SHAPE_NOISE_SCALE="0.0"
-  DEFAULT_DIPOLE_NOISE_SCALE="0.0"
 }
 
 apply_standard_scaffold_preset
@@ -270,27 +231,10 @@ show_defaults() {
   echo "  Scaffold family      ${DEFAULT_SCAFFOLD_FAMILY}"
   echo "  Min nodes            ${DEFAULT_MIN_NODES}"
   echo "  Max nodes            ${DEFAULT_MAX_NODES}"
-  echo "  Helix radius min     ${DEFAULT_HELIX_RADIUS_MIN}"
-  echo "  Helix radius max     ${DEFAULT_HELIX_RADIUS_MAX}"
-  echo "  Helix pitch min      ${DEFAULT_HELIX_PITCH_MIN}"
-  echo "  Helix pitch max      ${DEFAULT_HELIX_PITCH_MAX}"
-  echo "  Alpha radius scale   ${DEFAULT_ALPHA_HELIX_RADIUS_SCALE}"
-  echo "  Alpha pitch scale    ${DEFAULT_ALPHA_HELIX_PITCH_SCALE}"
-  echo "  Sheet run min        ${DEFAULT_SHEET_RUN_LENGTH_MIN}"
-  echo "  Sheet run max        ${DEFAULT_SHEET_RUN_LENGTH_MAX}"
-  echo "  Sheet turn step      ${DEFAULT_SHEET_TURN_STEP}"
-  echo "  Position noise std   ${DEFAULT_POSITION_NOISE_STD}"
-  echo "  Sequence pos max     ${DEFAULT_SEQUENCE_POS_MAX:-auto}"
-  echo "  Shape noise scale    ${DEFAULT_SHAPE_NOISE_SCALE}"
-  echo "  Dipole noise scale   ${DEFAULT_DIPOLE_NOISE_SCALE}"
 }
 
 generate_source_dataset() {
-  local samples seed output_path scaffold_family min_nodes max_nodes sequence_pos_max
-  local helix_radius_min helix_radius_max helix_pitch_min helix_pitch_max
-  local alpha_helix_radius_scale alpha_helix_pitch_scale
-  local sheet_run_length_min sheet_run_length_max sheet_turn_step
-  local position_noise_std shape_noise_scale dipole_noise_scale
+  local samples seed output_path scaffold_family min_nodes max_nodes
 
   samples="$(prompt_with_default "Number of source LEGO examples" "${DEFAULT_SOURCE_SAMPLES}")"
   seed="$(prompt_with_default "Random seed" "13")"
@@ -298,20 +242,6 @@ generate_source_dataset() {
   scaffold_family="$(prompt_with_default "Scaffold family (mixed/chain/alpha_helix/sheet)" "${DEFAULT_SCAFFOLD_FAMILY}")"
   min_nodes="$(prompt_with_default "Minimum nodes per sample" "${DEFAULT_MIN_NODES}")"
   max_nodes="$(prompt_with_default "Maximum nodes per sample" "${DEFAULT_MAX_NODES}")"
-  helix_radius_min="$(prompt_with_default "Helix radius min" "${DEFAULT_HELIX_RADIUS_MIN}")"
-  helix_radius_max="$(prompt_with_default "Helix radius max" "${DEFAULT_HELIX_RADIUS_MAX}")"
-  helix_pitch_min="$(prompt_with_default "Helix pitch min" "${DEFAULT_HELIX_PITCH_MIN}")"
-  helix_pitch_max="$(prompt_with_default "Helix pitch max" "${DEFAULT_HELIX_PITCH_MAX}")"
-  alpha_helix_radius_scale="$(prompt_with_default "Alpha-helix radius scale" "${DEFAULT_ALPHA_HELIX_RADIUS_SCALE}")"
-  alpha_helix_pitch_scale="$(prompt_with_default "Alpha-helix pitch scale" "${DEFAULT_ALPHA_HELIX_PITCH_SCALE}")"
-  sheet_run_length_min="$(prompt_with_default "Sheet run length min" "${DEFAULT_SHEET_RUN_LENGTH_MIN}")"
-  sheet_run_length_max="$(prompt_with_default "Sheet run length max" "${DEFAULT_SHEET_RUN_LENGTH_MAX}")"
-  sheet_turn_step="$(prompt_with_default "Sheet turn step" "${DEFAULT_SHEET_TURN_STEP}")"
-  position_noise_std="$(prompt_with_default "Position noise std" "${DEFAULT_POSITION_NOISE_STD}")"
-  shape_noise_scale="$(prompt_with_default "Shape noise scale" "${DEFAULT_SHAPE_NOISE_SCALE}")"
-  dipole_noise_scale="$(prompt_with_default "Dipole noise scale" "${DEFAULT_DIPOLE_NOISE_SCALE}")"
-  sequence_pos_max="${DEFAULT_SEQUENCE_POS_MAX}"
-  sequence_pos_max="$(prompt_with_default "Sequence position max (blank=auto)" "${DEFAULT_SEQUENCE_POS_MAX}")"
 
   if ! confirm_overwrite "${output_path}"; then
     echo "Cancelled."
@@ -320,29 +250,14 @@ generate_source_dataset() {
 
   mkdir -p "$(dirname "${output_path}")"
   local cmd=(
-    "${PYTHON_CMD}" "${ROOT_DIR}/lego/lego_engine.py"
+    "${PYTHON_CMD}" "${ROOT_DIR}/lego/lattice.py"
     --samples "${samples}"
     --seed "${seed}"
     --path "${output_path}"
     --scaffold-family "${scaffold_family}"
     --min-nodes "${min_nodes}"
     --max-nodes "${max_nodes}"
-    --helix-radius-min "${helix_radius_min}"
-    --helix-radius-max "${helix_radius_max}"
-    --helix-pitch-min "${helix_pitch_min}"
-    --helix-pitch-max "${helix_pitch_max}"
-    --alpha-helix-radius-scale "${alpha_helix_radius_scale}"
-    --alpha-helix-pitch-scale "${alpha_helix_pitch_scale}"
-    --sheet-run-length-min "${sheet_run_length_min}"
-    --sheet-run-length-max "${sheet_run_length_max}"
-    --sheet-turn-step "${sheet_turn_step}"
-    --position-noise-std "${position_noise_std}"
-    --shape-noise-scale "${shape_noise_scale}"
-    --dipole-noise-scale "${dipole_noise_scale}"
   )
-  if [[ -n "${sequence_pos_max}" ]]; then
-    cmd+=(--sequence-pos-max "${sequence_pos_max}")
-  fi
   if run_cmd "${cmd[@]}"; then
     SOURCE_DATASET_PATH="${output_path}"
   fi
@@ -637,7 +552,7 @@ tail_training_log() {
 print_menu() {
   echo
   echo "LEGO Workflow Menu"
-  echo "  1) Generate source LEGO dataset"
+  echo "  1) Generate raw LEGO dataset"
   echo "  2) Generate LEGO diffusion dataset"
   echo "  3) Inspect LEGO diffusion dataset"
   echo "  4) Train LEGO flow-matching model"

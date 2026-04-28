@@ -222,6 +222,16 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of candidates used by `input_knn` shape decoding.",
     )
     parser.add_argument(
+        "--position-centering",
+        type=str,
+        default="auto",
+        choices=("auto", "center", "no-center"),
+        help=(
+            "Override how positions are centered during sampling. "
+            "`auto` follows the checkpoint config; `no-center` disables centering entirely."
+        ),
+    )
+    parser.add_argument(
         "--skip-diffusion-fields",
         type=str,
         nargs="*",
@@ -233,6 +243,29 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def _apply_position_centering_override(
+    corrupt_field_settings: Dict[str, Dict[str, Any]],
+    position_centering: str,
+) -> Dict[str, Dict[str, Any]]:
+    mode = str(position_centering).strip().lower()
+    if mode == "auto":
+        return corrupt_field_settings
+    if mode not in {"center", "no-center"}:
+        raise ValueError(f"Unsupported position centering override '{position_centering}'.")
+    if AtomicDataDict.POSITIONS_KEY not in corrupt_field_settings:
+        return corrupt_field_settings
+    settings = dict(corrupt_field_settings)
+    spec = dict(settings[AtomicDataDict.POSITIONS_KEY])
+    enabled = mode == "center"
+    spec["center"] = enabled
+    spec["center_noise"] = enabled
+    if not enabled:
+        spec["center_mask_field"] = ""
+        spec["noise_center_mask_field"] = ""
+    settings[AtomicDataDict.POSITIONS_KEY] = spec
+    return settings
 
 
 def _normalize_skip_field_tokens(raw_tokens: Sequence[str] | None) -> List[str]:
@@ -846,6 +879,7 @@ def _build_model_input(
     *,
     batch: torch.Tensor,
     node_types: torch.Tensor,
+    branch_kind: torch.Tensor | None,
     sequence_position: torch.Tensor | None,
     rotations: torch.Tensor,
     tau_value: float,
@@ -867,6 +901,8 @@ def _build_model_input(
         AtomicDataDict.POCKET_MASK_KEY: state["pocket_mask"].unsqueeze(-1).to(dtype=torch.float32),
         AtomicDataDict.ROTATIONS_KEY: rotations,
     }
+    if branch_kind is not None:
+        payload["branch_kind"] = branch_kind
     if sequence_position is not None:
         payload["sequence_position"] = sequence_position
     return payload
@@ -1181,6 +1217,13 @@ def sample_example(
     )
     batch = torch.zeros((int(example["num_nodes"]),), dtype=torch.long, device=device)
     node_types = torch.as_tensor(example["node_types"], dtype=torch.long, device=device).unsqueeze(-1)
+    branch_kind = None
+    if "branch_kind" in example:
+        branch_kind = torch.as_tensor(example["branch_kind"], dtype=torch.long, device=device)
+        if branch_kind.ndim == 1:
+            branch_kind = branch_kind.unsqueeze(-1)
+    else:
+        branch_kind = torch.zeros((int(example["num_nodes"]), 1), dtype=torch.long, device=device)
     sequence_position = torch.as_tensor(example.get("sequence_position"), dtype=torch.long, device=device)
     if sequence_position.ndim == 1:
         sequence_position = sequence_position.unsqueeze(-1)
@@ -1221,6 +1264,7 @@ def sample_example(
             state,
             batch=batch,
             node_types=node_types,
+            branch_kind=branch_kind,
             sequence_position=sequence_position,
             rotations=rotations,
             tau_value=tau_value,
@@ -1258,6 +1302,7 @@ def sample_example(
                 provisional_state,
                 batch=batch,
                 node_types=node_types,
+                branch_kind=branch_kind,
                 sequence_position=sequence_position,
                 rotations=rotations,
                 tau_value=tau_next_value,
@@ -1438,6 +1483,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     model, config, _ = CheckpointHandler.load_model(str(args.model), device=args.device)
     validate_flow_checkpoint_config(config)
     corrupt_field_settings = infer_corrupt_field_settings(config)
+    corrupt_field_settings = _apply_position_centering_override(corrupt_field_settings, args.position_centering)
     corrupt_field_map = infer_corrupt_field_map(config)
     available_fields = list(corrupt_field_map.keys())
     skip_fields = _normalize_skip_field_tokens(args.skip_diffusion_fields)

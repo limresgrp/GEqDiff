@@ -4,7 +4,7 @@ This repository now uses a deterministic scaffold generator and direct-tensor fl
 
 ## Dataset generation
 
-Main entrypoint: [lego_engine.py](/home/angiod@usi.ch/GEqDiff/lego/lego_engine.py)
+Main entrypoint: [lattice.py](/home/angiod@usi.ch/GEqDiff/lego/lattice.py)
 
 Pipeline per sample:
 
@@ -21,9 +21,12 @@ Important notes:
 - Junction graph topologies are disabled by design to avoid sequence-order ambiguity on large datasets.
 - `T-shape` bricks are now used as local turn/helix motifs (sparse high-curvature sites), not as branch-junction connectors.
 - For backward compatibility, this motif currently reuses the historical role label `JUNCTION_T`.
+- In `alpha_helix` family mode, helices are sampled with fixed dextrorse handedness and phase-driven periodic brick programs (type + orientation), with collision-safe placement.
+- Current brick policy: alpha helices use a simplified periodic `1x1/1x2` motif; chain straight segments prefer `T-shape`, and turns/loops prefer `L-shape`.
 - `shape_features` are direct 16D coefficients (`1x0e + 1x1o + 1x2e + 1x3o`) from role prototypes.
 - `dipole_direction` is a direct 3D vector target (magnitude encoded in vector norm).
 - `sequence_position` is stored and used as node input (positional categorical embedding in model configs).
+- `branch_kind` is emitted per brick by the raw lattice generator and is preserved through diffusion dataset building and model input configs.
 
 ## Training/sampling assumptions
 
@@ -71,7 +74,7 @@ and detailed metric cards for sampled/original/compare, including relative-overl
 
 ## Useful files
 
-- Generator: [lego_engine.py](/home/angiod@usi.ch/GEqDiff/lego/lego_engine.py)
+- Generator: [lattice.py](/home/angiod@usi.ch/GEqDiff/lego/lattice.py)
 - Scaffold sampler: [scaffold_sampling.py](/home/angiod@usi.ch/GEqDiff/lego/scaffold_sampling.py)
 - Roles/descriptors/prototypes:  
   [descriptors.py](/home/angiod@usi.ch/GEqDiff/lego/descriptors.py),  
