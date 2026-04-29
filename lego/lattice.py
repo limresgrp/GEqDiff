@@ -194,25 +194,25 @@ class LegoProceduralEngine:
 
     def _generate_sheet(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
         current_len = 0
-        left_turn = True 
-        
+        left_turn = True
+        ladder_step = False
+        straight_cycle = ("1x2", "1x1")
+
         while current_len < target_length:
-            # Enforce more compact runs to prevent extreme lengths
-            run_length = rng.integers(2, 5) 
-            for i in range(run_length):
+            for i in range(3):
                 if current_len >= target_length: return True
-                
-                if i % 2 == 0 and i < run_length - 1 and rng.random() > 0.5:
-                    if not turtle.place_and_advance("1x2", "PLANAR", (2, 0, 0)): return False
-                    if not turtle.place_and_advance("1x1", "PLANAR", (1, 0, 0)): return False
-                    current_len += 2
-                else:
-                    if not turtle.place_and_advance("1x1", "STRAIGHT", (1, 0, 0)): return False
-                    current_len += 1
+
+                brick_type = straight_cycle[current_len % len(straight_cycle)]
+                role = "PLANAR" if brick_type == "1x2" else "SHEET_EDGE"
+                if not turtle.place_and_advance(brick_type, role, (2 if brick_type == "1x2" else 1, 0, 0)): return False
+                current_len += 1
             
             if current_len >= target_length: return True
 
-            # First Corner
+            # First Corner, with an alternating out-of-plane ladder step to keep
+            # the sheet compact and make the bend sequence more deterministic.
+            if ladder_step:
+                turtle.pitch_up()
             if left_turn:
                 if not turtle.place_and_advance("L-shape", "BEND_LEFT", (0, 2, 0)): return False
                 turtle.yaw_left()
@@ -222,16 +222,17 @@ class LegoProceduralEngine:
                 turtle.yaw_left() # Local left always turns into the normal
                 turtle.roll()
             current_len += 1
+            if ladder_step:
+                turtle.pitch_down()
             if current_len >= target_length: return True
             
-            # Tighter U-turns for compactness
-            gap_length = rng.integers(1, 3) 
-            for _ in range(gap_length):
-                if not turtle.place_and_advance("1x1", "SHEET_EDGE", (1, 0, 0)): return False
-                current_len += 1
-                if current_len >= target_length: return True
-                
+            if not turtle.place_and_advance("1x1", "SHEET_EDGE", (1, 0, 0)): return False
+            current_len += 1
+            if current_len >= target_length: return True
+
             # Second Corner
+            if ladder_step:
+                turtle.pitch_up()
             if left_turn:
                 if not turtle.place_and_advance("L-shape", "BEND_LEFT", (0, 2, 0)): return False
                 turtle.yaw_left()
@@ -241,19 +242,22 @@ class LegoProceduralEngine:
                 turtle.yaw_left()
                 turtle.roll()
             current_len += 1
-            
-            left_turn = not left_turn 
+            if ladder_step:
+                turtle.pitch_down()
+
+            left_turn = not left_turn
+            ladder_step = not ladder_step
         return True
 
     def _generate_chain(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
         current_len = 0
         up_state = True
-        
+        turn_left = True
+
         while current_len < target_length:
-            run_length = rng.integers(4, 8)
-            for _ in range(run_length):
+            for _ in range(2):
                 if current_len >= target_length: return True
-                
+
                 if current_len % 2 == 0:
                     turtle.forward(1) # Clear connection bay for the T-shape's rear arm
                     if not up_state: turtle.roll() 
@@ -267,8 +271,7 @@ class LegoProceduralEngine:
 
             if current_len >= target_length: return True
 
-            turn_dir = rng.choice(["left", "right"])
-            if turn_dir == "left":
+            if turn_left:
                 if not turtle.place_and_advance("L-shape", "BEND_LEFT", (0, 2, 0)): return False
                 turtle.yaw_left()
             else:
@@ -279,14 +282,11 @@ class LegoProceduralEngine:
             current_len += 1
             if current_len >= target_length: return True
             
-            gap_length = rng.integers(2, 4)
-            for _ in range(gap_length):
-                if not turtle.place_and_advance("1x1", "STRAIGHT", (1, 0, 0)): return False
-                current_len += 1
-                if current_len >= target_length: return True
-                
-            turn_dir = rng.choice(["left", "right"])
-            if turn_dir == "left":
+            if not turtle.place_and_advance("1x1", "STRAIGHT", (1, 0, 0)): return False
+            current_len += 1
+            if current_len >= target_length: return True
+
+            if turn_left:
                 if not turtle.place_and_advance("L-shape", "BEND_LEFT", (0, 2, 0)): return False
                 turtle.yaw_left()
             else:
@@ -295,6 +295,7 @@ class LegoProceduralEngine:
                 turtle.yaw_left()
                 turtle.roll()
             current_len += 1
+            turn_left = not turn_left
         return True
 
     def _generate_alpha_helix(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
