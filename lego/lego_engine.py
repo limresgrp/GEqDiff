@@ -4,7 +4,7 @@ This replaces legacy SH/shell and heuristic post-hoc placement flows with:
 positions + topology -> descriptors -> roles -> shape/color/dipole.
 
 Current scaffold generation excludes graph junctions to keep a deterministic
-single-chain ordering; T-shapes are instead assigned as local turn motifs.
+single-path ordering; T-shapes are instead assigned as local turn motifs.
 """
 
 from __future__ import annotations
@@ -243,7 +243,7 @@ class LegoDeterministicEngine:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate deterministic scaffold-based LEGO samples (chain/sheet/helix, no junction topologies)."
+        description="Generate deterministic scaffold-based LEGO samples (beta_sheet/alpha_helix/mixed, no junction topologies)."
     )
     parser.add_argument("--samples", type=int, default=1, help="Number of samples to generate.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
@@ -252,7 +252,7 @@ def parse_args() -> argparse.Namespace:
         "--scaffold-family",
         type=str,
         default="mixed",
-        choices=["mixed", "chain", "alpha_helix", "sheet"],
+        help="Scaffold family: mixed, beta_sheet, alpha_helix (chain and sheet are accepted as legacy aliases).",
     )
     parser.add_argument("--min-nodes", type=int, default=18)
     parser.add_argument("--max-nodes", type=int, default=40)

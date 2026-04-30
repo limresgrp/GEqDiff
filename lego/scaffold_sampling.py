@@ -68,6 +68,10 @@ class ScaffoldSampler:
         self.min_nodes = int(max(8, min_nodes))
         self.max_nodes = int(max(self.min_nodes, max_nodes))
         self.family = str(family).strip().lower()
+        if self.family == "chain":
+            self.family = "beta_sheet"
+        if self.family == "sheet":
+            self.family = "beta_sheet"
         self.branch_depth_limit = int(max(1, branch_depth_limit))
         self.bifurcation_probability = float(np.clip(bifurcation_probability, 0.0, 1.0))
         self.chain_helix_probability = float(np.clip(chain_helix_probability, 0.0, 1.0))
@@ -83,18 +87,18 @@ class ScaffoldSampler:
         self.sheet_turn_step = int(max(1, sheet_turn_step))
         self.junction_angle_min_rad = float(np.deg2rad(max(5.0, junction_angle_min_deg)))
         self.position_noise_std = float(max(0.0, position_noise_std))
-        if self.family not in {"mixed", "chain", "sheet", "alpha_helix"}:
+        if self.family not in {"mixed", "beta_sheet", "alpha_helix"}:
             raise ValueError(f"Unsupported scaffold family '{family}'.")
 
     def _choose_family(self, rng: np.random.Generator) -> str:
         if self.family != "mixed":
             return self.family
-        sheet_prob = float(np.clip(self.bifurcation_probability, 0.10, 0.60))
+        beta_sheet_prob = float(np.clip(self.bifurcation_probability, 0.10, 0.60))
         alpha_prob = float(np.clip(0.5 * self.chain_helix_probability, 0.10, 0.35))
-        chain_prob = float(max(0.05, 1.0 - sheet_prob - alpha_prob))
-        probs = np.asarray([chain_prob, sheet_prob, alpha_prob], dtype=np.float32)
+        beta_prob = float(max(0.05, 1.0 - beta_sheet_prob - alpha_prob))
+        probs = np.asarray([beta_prob, alpha_prob], dtype=np.float32)
         probs = probs / np.clip(probs.sum(), 1e-8, None)
-        return str(rng.choice(np.asarray(["chain", "sheet", "alpha_helix"]), p=probs))
+        return str(rng.choice(np.asarray(["beta_sheet", "alpha_helix"]), p=probs))
 
     @staticmethod
     def _build_tree_degree(parent_id: np.ndarray) -> np.ndarray:
@@ -112,7 +116,7 @@ class ScaffoldSampler:
         n_nodes: int,
         rng: np.random.Generator,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Sample brick-level anchors for sheet/chain grammars.
+        """Sample brick-level anchors for beta-sheet grammars.
 
         Returns
         -------
@@ -292,12 +296,12 @@ class ScaffoldSampler:
             if anchors.shape[0] < self.min_nodes:
                 continue
 
-            if family == "sheet":
+            if family == "beta_sheet":
                 noise_std = min(self.position_noise_std, 0.01)
-                hidden_label = "orthogonal_sheet"
+                hidden_label = "orthogonal_beta_sheet"
             else:
                 noise_std = min(self.position_noise_std, 0.02)
-                hidden_label = "orthogonal_chain"
+                hidden_label = "orthogonal_beta_sheet"
 
             if noise_std > 0.0:
                 anchors = anchors + rng.normal(scale=noise_std, size=anchors.shape).astype(np.float32)

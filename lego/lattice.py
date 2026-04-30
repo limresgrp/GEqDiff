@@ -176,6 +176,15 @@ class DiscreteTurtle:
 
 
 class LegoProceduralEngine:
+    @staticmethod
+    def _canonical_family(family: str) -> str:
+        family = str(family).strip().lower()
+        if family == "chain":
+            return "beta_sheet"
+        if family == "sheet":
+            return "beta_sheet"
+        return family
+
     def __init__(
         self,
         *,
@@ -188,7 +197,9 @@ class LegoProceduralEngine:
         self.irreps = DEFAULT_IRREPS
         self.min_nodes = max(8, min_nodes)
         self.max_nodes = max(self.min_nodes, max_nodes)
-        self.scaffold_family = scaffold_family.strip().lower()
+        self.scaffold_family = self._canonical_family(scaffold_family)
+        if self.scaffold_family not in {"mixed", "beta_sheet", "alpha_helix"}:
+            raise ValueError(f"Unsupported scaffold family '{scaffold_family}'.")
         self.dipole_noise_scale = dipole_noise_scale
         self.shape_noise_scale = shape_noise_scale
 
@@ -210,7 +221,7 @@ class LegoProceduralEngine:
             if current_len >= target_length: return True
 
             # First Corner, with an alternating out-of-plane ladder step to keep
-            # the sheet compact and make the bend sequence more deterministic.
+            # keep the beta-sheet compact and make the bend sequence more deterministic.
             if ladder_step:
                 turtle.pitch_up()
             if left_turn:
@@ -249,7 +260,7 @@ class LegoProceduralEngine:
             ladder_step = not ladder_step
         return True
 
-    def _generate_chain(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
+    def _generate_beta_sheet(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
         current_len = 0
         up_state = True
         turn_left = True
@@ -324,59 +335,48 @@ class LegoProceduralEngine:
         return True
 
     def _generate_mixed(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
-        """
-        Alternates multi-block segments of different secondary structures 
-        to form a heterogeneous complex scaffold.
-        """
         current_len = 0
-        
+        segment_beta_sheet = True
+
         while current_len < target_length:
-            # Sample a chunk length for the next structural domain
-            segment_length = int(rng.integers(6, 13))
-            if current_len + segment_length > target_length:
-                segment_length = target_length - current_len
-            
-            segment_type = str(rng.choice(["chain", "sheet", "alpha_helix"], p=[0.35, 0.35, 0.30]))
+            segment_length = min(8 if segment_beta_sheet else 10, target_length - current_len)
             start_nodes = len(turtle.anchors)
-            
-            # The generators will automatically sprout the new domain starting exactly
-            # from the local affine frame left behind by the previous domain.
-            if segment_type == "sheet":
-                if not self._generate_sheet(turtle, segment_length, rng): return False
-            elif segment_type == "chain":
-                if not self._generate_chain(turtle, segment_length, rng): return False
-            elif segment_type == "alpha_helix":
-                if not self._generate_alpha_helix(turtle, segment_length, rng): return False
-                
+
+            if segment_beta_sheet:
+                if not self._generate_beta_sheet(turtle, segment_length, rng):
+                    return False
+            else:
+                if not self._generate_alpha_helix(turtle, segment_length, rng):
+                    return False
+
             added = len(turtle.anchors) - start_nodes
             if added == 0: 
                 return False # Failsafe
             current_len += added
+            segment_beta_sheet = not segment_beta_sheet
             
         return True
 
     def build_sample(self, *, rng: np.random.Generator) -> Dict:
         target_nodes = int(rng.integers(self.min_nodes, self.max_nodes + 1))
-        
+
         for attempt in range(100):
             family = self.scaffold_family
             turtle = DiscreteTurtle(start_pos=np.array([0, 0, 0]))
-            
+
             success = False
-            if family == "sheet":
-                success = self._generate_sheet(turtle, target_nodes, rng)
-            elif family == "chain":
-                success = self._generate_chain(turtle, target_nodes, rng)
+            if family == "beta_sheet":
+                success = self._generate_beta_sheet(turtle, target_nodes, rng)
             elif family == "alpha_helix":
                 success = self._generate_alpha_helix(turtle, target_nodes, rng)
             elif family == "mixed":
                 success = self._generate_mixed(turtle, target_nodes, rng)
-                
+
             if success and len(turtle.anchors) >= self.min_nodes:
                 break
         else:
             raise RuntimeError("Failed to generate a non-overlapping scaffold after 100 attempts.")
-            
+
         anchors = np.array(turtle.anchors, dtype=np.float32)
         rotations = np.array(turtle.rotations, dtype=np.float32)
         brick_types = np.array(turtle.brick_types)
@@ -415,11 +415,7 @@ class LegoProceduralEngine:
                 [
                     "alpha_helix"
                     if str(role).startswith("HELIX_PHASE_")
-                    else "sheet"
-                    if str(role) in {"PLANAR", "SHEET_EDGE", "BEND_LEFT", "BEND_RIGHT"}
-                    else "chain"
-                    if str(role) in {"STRAIGHT", "JUNCTION_BRANCH_LEFT", "JUNCTION_BRANCH_RIGHT", "JUNCTION_T"}
-                    else "mixed"
+                    else "beta_sheet"
                     for role in role_names.tolist()
                 ],
                 dtype="<U16",
@@ -449,15 +445,17 @@ class LegoProceduralEngine:
         rng = np.random.default_rng(seed)
         return [self.build_sample(rng=rng) for _ in range(int(n_samples))]
 
+    def _generate_chain(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
+        """Backward-compatible alias for the beta-sheet generator."""
+        return self._generate_beta_sheet(turtle, target_length, rng)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discrete Turtle-based LEGO dataset generator.")
     parser.add_argument("--samples", type=int, default=1, help="Number of samples to generate.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--path", type=str, default=str(default_dataset_path()), help="Output canonical dataset path.")
-    parser.add_argument(
-        "--scaffold-family", type=str, default="mixed", choices=["mixed", "chain", "alpha_helix", "sheet"]
-    )
+    parser.add_argument("--scaffold-family", type=str, default="mixed", help="Scaffold family: mixed, beta_sheet, alpha_helix (chain is accepted as a legacy alias).")
     parser.add_argument("--min-nodes", type=int, default=18)
     parser.add_argument("--max-nodes", type=int, default=40)
     return parser.parse_args()

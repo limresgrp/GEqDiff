@@ -32,9 +32,10 @@ from lego.utils import default_dataset_path, load_samples
 LIGAND_UNKNOWN_TYPE_NAME = "ligand_unknown"
 DIRECTION_VALID_EPS = 1e-6
 BRANCH_KIND_TO_ID = {
+    "beta_sheet": 0,
     "chain": 0,
+    "alpha_helix": 1,
     "helix": 1,
-    "sheet": 2,
     "unknown": 3,
 }
 

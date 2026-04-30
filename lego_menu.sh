@@ -239,7 +239,7 @@ generate_source_dataset() {
   samples="$(prompt_with_default "Number of source LEGO examples" "${DEFAULT_SOURCE_SAMPLES}")"
   seed="$(prompt_with_default "Random seed" "13")"
   output_path="$(prompt_with_default "Output source dataset path" "${SOURCE_DATASET_PATH}")"
-  scaffold_family="$(prompt_with_default "Scaffold family (mixed/chain/alpha_helix/sheet)" "${DEFAULT_SCAFFOLD_FAMILY}")"
+  scaffold_family="$(prompt_with_default "Scaffold family (mixed/beta_sheet/alpha_helix)" "${DEFAULT_SCAFFOLD_FAMILY}")"
   min_nodes="$(prompt_with_default "Minimum nodes per sample" "${DEFAULT_MIN_NODES}")"
   max_nodes="$(prompt_with_default "Maximum nodes per sample" "${DEFAULT_MAX_NODES}")"
 
