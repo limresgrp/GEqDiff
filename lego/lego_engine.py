@@ -39,8 +39,7 @@ class LegoDeterministicEngine:
         scaffold_family: str = "mixed",
         branch_depth_limit: int = 2,
         bifurcation_probability: float = 0.45,
-        chain_helix_probability: float = 0.45,
-        chain_curved_probability: float = 0.30,
+        alpha_helix_probability: float = 0.45,
         helix_radius_min: float = 1.6,
         helix_radius_max: float = 2.6,
         helix_pitch_min: float = 2.8,
@@ -85,8 +84,7 @@ class LegoDeterministicEngine:
             family=self.scaffold_family,
             branch_depth_limit=int(max(1, branch_depth_limit)),
             bifurcation_probability=float(np.clip(bifurcation_probability, 0.0, 1.0)),
-            chain_helix_probability=float(np.clip(chain_helix_probability, 0.0, 1.0)),
-            chain_curved_probability=float(np.clip(chain_curved_probability, 0.0, 1.0)),
+            alpha_helix_probability=float(np.clip(alpha_helix_probability, 0.0, 1.0)),
             helix_radius_min=float(helix_radius_min),
             helix_radius_max=float(helix_radius_max),
             helix_pitch_min=float(helix_pitch_min),
@@ -231,11 +229,6 @@ class LegoDeterministicEngine:
         sample["validation_num_components"] = np.asarray(validation["num_components"], dtype=np.int64)
         return sample
 
-    def generate_task(self, coefficients=None, seed: int | None = None):  # compatibility
-        _ = coefficients
-        rng = np.random.default_rng(seed)
-        return self.build_sample(rng=rng)
-
     def generate_dataset(self, n_samples: int = 1, seed: int | None = None) -> List[Dict]:
         rng = np.random.default_rng(seed)
         return [self.build_sample(rng=rng) for _ in range(int(n_samples))]
@@ -243,7 +236,7 @@ class LegoDeterministicEngine:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate deterministic scaffold-based LEGO samples (beta_sheet/alpha_helix/mixed, no junction topologies)."
+        description="Generate deterministic scaffold-based LEGO samples (beta_sheet, alpha_helix, mixed)."
     )
     parser.add_argument("--samples", type=int, default=1, help="Number of samples to generate.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
@@ -252,14 +245,13 @@ def parse_args() -> argparse.Namespace:
         "--scaffold-family",
         type=str,
         default="mixed",
-        help="Scaffold family: mixed, beta_sheet, alpha_helix (chain and sheet are accepted as legacy aliases).",
+        help="Scaffold family: mixed, beta_sheet, or alpha_helix.",
     )
     parser.add_argument("--min-nodes", type=int, default=18)
     parser.add_argument("--max-nodes", type=int, default=40)
     parser.add_argument("--branch-depth-limit", type=int, default=2)
     parser.add_argument("--bifurcation-probability", type=float, default=0.45)
-    parser.add_argument("--chain-helix-probability", type=float, default=0.45)
-    parser.add_argument("--chain-curved-probability", type=float, default=0.30)
+    parser.add_argument("--alpha-helix-probability", type=float, default=0.45)
     parser.add_argument("--helix-radius-min", type=float, default=1.6)
     parser.add_argument("--helix-radius-max", type=float, default=2.6)
     parser.add_argument("--helix-pitch-min", type=float, default=2.8)
@@ -292,8 +284,7 @@ def main() -> None:
         scaffold_family=args.scaffold_family,
         branch_depth_limit=args.branch_depth_limit,
         bifurcation_probability=args.bifurcation_probability,
-        chain_helix_probability=args.chain_helix_probability,
-        chain_curved_probability=args.chain_curved_probability,
+        alpha_helix_probability=args.alpha_helix_probability,
         helix_radius_min=args.helix_radius_min,
         helix_radius_max=args.helix_radius_max,
         helix_pitch_min=args.helix_pitch_min,
@@ -334,8 +325,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-# Backward compatibility aliases used by older scripts.
-LegoDipoleEngine = LegoDeterministicEngine
-LegoMultiPortEngine = LegoDeterministicEngine

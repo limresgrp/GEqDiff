@@ -268,13 +268,6 @@ def evaluate_structure_scores(
         "dipole_contact_energy": float(energy_eval["contact_energy"]),
         "mean_dipole_energy_per_face": float(energy_eval["mean_energy_per_face"]),
         "dipole_eval_error": dipole_eval_error,
-        # Backward-compatible aliases used by visualizer/report tables.
-        "attractive_contact_area": float(attractive_contact_count),
-        "repulsive_contact_area": float(repulsive_contact_count),
-        "neutral_contact_area": float(neutral_contact_count),
-        "total_contact_area": float(total_contact_count),
-        "weighted_dipole_energy": float(energy_eval["total_energy"]),
-        "mean_weighted_dipole_energy": float(energy_eval["mean_energy_per_face"]),
         "is_valid_like": bool(
             effective_overlap_volume <= VALID_LIKE_EFFECTIVE_OVERLAP
             and severe_overlapping_pairs == 0
@@ -622,6 +615,12 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
     original["absolute_scores"] = original_absolute_scores
 
     payload["original"] = original
+    sampled_weighted_energy = float(
+        sampled["metrics"].get("weighted_dipole_energy", sampled["metrics"].get("dipole_total_energy", 0.0))
+    )
+    original_weighted_energy = float(
+        original["metrics"].get("weighted_dipole_energy", original["metrics"].get("dipole_total_energy", 0.0))
+    )
     payload["compare"] = {
         "score_delta": {
             "validity": float(sampled["scores"]["validity"] - original["scores"]["validity"]),
@@ -635,7 +634,7 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
             "matched_face_ratio": float(sampled["metrics"]["matched_face_ratio"] - original["metrics"]["matched_face_ratio"]),
             "shell_surface_ratio": float(sampled["metrics"]["shell_surface_ratio"] - original["metrics"]["shell_surface_ratio"]),
             "weighted_dipole_energy": float(
-                sampled["metrics"]["weighted_dipole_energy"] - original["metrics"]["weighted_dipole_energy"]
+                sampled_weighted_energy - original_weighted_energy
             ),
             "shape_rmse": float(sampled["metrics"]["shape_rmse"]),
             "shape_type_accuracy": float(sampled["metrics"]["shape_type_accuracy"] - 1.0),

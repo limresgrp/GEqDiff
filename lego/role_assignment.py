@@ -55,7 +55,7 @@ def assign_roles(
     This version is intentionally grammar-driven:
 
     * beta_sheet: explicit turn nodes are L-shapes; straight nodes alternate
-      SHEET_EDGE/PLANAR, which map to 1x1/1x2. `chain` is a legacy alias.
+      SHEET_EDGE/PLANAR, which map to 1x1/1x2.
     * beta_sheet-like motifs: every internal node is a T-shape, alternating
       orientation through JUNCTION_BRANCH_LEFT/JUNCTION_BRANCH_RIGHT.
       Curvature no longer converts beta-sheet turns into L-shapes.
@@ -103,7 +103,7 @@ def assign_roles(
                 roles[node] = ROLE_TO_ID[f"HELIX_PHASE_{phase % 4}"]
             continue
 
-        if kind.startswith("beta_sheet") or kind.startswith("chain"):
+        if kind.startswith("beta_sheet"):
             if is_start:
                 roles[node] = ROLE_TO_ID["CAP_START"]
             elif is_end:
@@ -119,7 +119,7 @@ def assign_roles(
                 )
             continue
 
-        if kind.startswith("beta_sheet") or kind.startswith("sheet"):
+        if kind.startswith("beta_sheet"):
             if bool(sheet_turn_mask[node]):
                 signed_bend = float(np.dot(bend_axis[node], branch_local_normal[node]))
                 roles[node] = ROLE_TO_ID["BEND_LEFT"] if signed_bend >= 0.0 else ROLE_TO_ID["BEND_RIGHT"]
@@ -152,7 +152,7 @@ def assign_roles(
         if order.size < 2:
             continue
         kind = str(branch_kind[int(order[0])]).lower()
-        if not (kind.startswith("beta_sheet") or kind.startswith("sheet")):
+        if not kind.startswith("beta_sheet"):
             continue
         segment_ids = sheet_segment_id[order]
         unique_segments = [int(seg) for seg in np.unique(segment_ids).tolist() if int(seg) >= 0]

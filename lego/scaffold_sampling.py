@@ -51,8 +51,7 @@ class ScaffoldSampler:
         family: str = "mixed",
         branch_depth_limit: int = 2,
         bifurcation_probability: float = 0.45,
-        chain_helix_probability: float = 0.45,
-        chain_curved_probability: float = 0.30,
+        alpha_helix_probability: float = 0.45,
         helix_radius_min: float = 1.2,
         helix_radius_max: float = 2.0,
         helix_pitch_min: float = 2.2,
@@ -68,14 +67,12 @@ class ScaffoldSampler:
         self.min_nodes = int(max(8, min_nodes))
         self.max_nodes = int(max(self.min_nodes, max_nodes))
         self.family = str(family).strip().lower()
-        if self.family == "chain":
-            self.family = "beta_sheet"
-        if self.family == "sheet":
-            self.family = "beta_sheet"
+        if self.family not in {"mixed", "beta_sheet", "alpha_helix"}:
+            raise ValueError(f"Unsupported scaffold family '{family}'. Must be mixed, beta_sheet, or alpha_helix.")
+        
         self.branch_depth_limit = int(max(1, branch_depth_limit))
         self.bifurcation_probability = float(np.clip(bifurcation_probability, 0.0, 1.0))
-        self.chain_helix_probability = float(np.clip(chain_helix_probability, 0.0, 1.0))
-        self.chain_curved_probability = float(np.clip(chain_curved_probability, 0.0, 1.0))
+        self.alpha_helix_probability = float(np.clip(alpha_helix_probability, 0.0, 1.0))
         self.helix_radius_min = float(min(helix_radius_min, helix_radius_max))
         self.helix_radius_max = float(max(helix_radius_min, helix_radius_max))
         self.helix_pitch_min = float(min(helix_pitch_min, helix_pitch_max))
@@ -87,14 +84,12 @@ class ScaffoldSampler:
         self.sheet_turn_step = int(max(1, sheet_turn_step))
         self.junction_angle_min_rad = float(np.deg2rad(max(5.0, junction_angle_min_deg)))
         self.position_noise_std = float(max(0.0, position_noise_std))
-        if self.family not in {"mixed", "beta_sheet", "alpha_helix"}:
-            raise ValueError(f"Unsupported scaffold family '{family}'.")
 
     def _choose_family(self, rng: np.random.Generator) -> str:
         if self.family != "mixed":
             return self.family
         beta_sheet_prob = float(np.clip(self.bifurcation_probability, 0.10, 0.60))
-        alpha_prob = float(np.clip(0.5 * self.chain_helix_probability, 0.10, 0.35))
+        alpha_prob = float(np.clip(0.5 * self.alpha_helix_probability, 0.10, 0.35))
         beta_prob = float(max(0.05, 1.0 - beta_sheet_prob - alpha_prob))
         probs = np.asarray([beta_prob, alpha_prob], dtype=np.float32)
         probs = probs / np.clip(probs.sum(), 1e-8, None)

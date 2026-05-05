@@ -176,14 +176,6 @@ class DiscreteTurtle:
 
 
 class LegoProceduralEngine:
-    @staticmethod
-    def _canonical_family(family: str) -> str:
-        family = str(family).strip().lower()
-        if family == "chain":
-            return "beta_sheet"
-        if family == "sheet":
-            return "beta_sheet"
-        return family
 
     def __init__(
         self,
@@ -197,9 +189,9 @@ class LegoProceduralEngine:
         self.irreps = DEFAULT_IRREPS
         self.min_nodes = max(8, min_nodes)
         self.max_nodes = max(self.min_nodes, max_nodes)
-        self.scaffold_family = self._canonical_family(scaffold_family)
+        self.scaffold_family = str(scaffold_family).strip().lower()
         if self.scaffold_family not in {"mixed", "beta_sheet", "alpha_helix"}:
-            raise ValueError(f"Unsupported scaffold family '{scaffold_family}'.")
+            raise ValueError(f"Unsupported scaffold family '{scaffold_family}'. Must be mixed, beta_sheet, or alpha_helix.")
         self.dipole_noise_scale = dipole_noise_scale
         self.shape_noise_scale = shape_noise_scale
 
@@ -445,17 +437,13 @@ class LegoProceduralEngine:
         rng = np.random.default_rng(seed)
         return [self.build_sample(rng=rng) for _ in range(int(n_samples))]
 
-    def _generate_chain(self, turtle: DiscreteTurtle, target_length: int, rng: np.random.Generator) -> bool:
-        """Backward-compatible alias for the beta-sheet generator."""
-        return self._generate_beta_sheet(turtle, target_length, rng)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discrete Turtle-based LEGO dataset generator.")
     parser.add_argument("--samples", type=int, default=1, help="Number of samples to generate.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument("--path", type=str, default=str(default_dataset_path()), help="Output canonical dataset path.")
-    parser.add_argument("--scaffold-family", type=str, default="mixed", help="Scaffold family: mixed, beta_sheet, alpha_helix (chain is accepted as a legacy alias).")
+    parser.add_argument("--scaffold-family", type=str, default="mixed", help="Scaffold family: mixed, beta_sheet, or alpha_helix.")
     parser.add_argument("--min-nodes", type=int, default=18)
     parser.add_argument("--max-nodes", type=int, default=40)
     return parser.parse_args()

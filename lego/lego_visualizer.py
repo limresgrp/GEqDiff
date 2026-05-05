@@ -98,16 +98,6 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Show dipole axes on top of the current structure.",
     )
-    parser.add_argument(
-        "--show-ports",
-        action="store_true",
-        help="Deprecated compatibility alias for `--show-dipoles`.",
-    )
-    parser.add_argument(
-        "--show-target-voxels",
-        action="store_true",
-        help="Compatibility flag that sets the initial target view to `voxels`.",
-    )
     parser.add_argument("--output-html", type=Path, default=None, help="Optional HTML output path.")
     parser.add_argument(
         "--trajectory-stride",
@@ -1801,7 +1791,6 @@ def _build_html(
               ["Dipole angle (deg)", "dipole_angle_deg", 2],
               ["Dipole magnitude RMSE", "dipole_magnitude_rmse", 3],
               ["Dipole energy delta", "dipole_energy_delta", 3],
-              ["Weighted dipole energy delta", "weighted_dipole_energy", 3],
             ], deltas)}}
           </div>
         </details>
@@ -2292,10 +2281,10 @@ def main() -> None:
     if len(samples) == 0:
         raise ValueError(f"No samples found in {args.path}.")
 
-    initial_target = "voxels" if args.show_target_voxels else args.target_view
+    initial_target = args.target_view
     if initial_target == "surface":
         initial_target = "filled"
-    show_dipoles = bool(args.show_dipoles or args.show_ports)
+    show_dipoles = bool(args.show_dipoles)
 
     html = _build_html(
         samples=samples,
