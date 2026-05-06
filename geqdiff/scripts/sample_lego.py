@@ -522,6 +522,11 @@ def extract_example(data: Dict[str, np.ndarray], example_index: int) -> Dict[str
     else:
         # Backward-compatible fallback for older diffusion datasets.
         example["sequence_position"] = np.arange(num_nodes, dtype=np.int64)[:, None]
+    if "branch_kind" in data:
+        branch_kind = _slice_dense_field(data, "branch_kind", example_index, num_nodes).astype(np.int64)
+        example["branch_kind"] = branch_kind.reshape(num_nodes)
+    else:
+        example["branch_kind"] = np.zeros((num_nodes,), dtype=np.int64)
     for field in (
         "shape_features_raw",
         "brick_dipoles_raw",
@@ -1421,6 +1426,11 @@ def sample_example(
         "original_brick_rotations": np.asarray(example["rotations"], dtype=np.float32),
         "original_brick_features": original_shape,
         "original_brick_dipoles": original_dipoles,
+        "branch_kind": np.asarray(example["branch_kind"], dtype=np.int64),
+        "original_branch_kind": np.asarray(example["branch_kind"], dtype=np.int64),
+        "sequence_position": np.asarray(example["sequence_position"], dtype=np.int64),
+        "brick_sequence_position": np.asarray(example["sequence_position"], dtype=np.int64).reshape(-1),
+        "original_sequence_position": np.asarray(example["sequence_position"], dtype=np.int64),
         "sampled_brick_mask": np.asarray(example["ligand_mask"], dtype=bool),
         "ligand_mask": np.asarray(example["ligand_mask"], dtype=bool),
         "pocket_mask": np.asarray(example["pocket_mask"], dtype=bool),

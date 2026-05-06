@@ -197,6 +197,40 @@ def _brick_name(sample: Dict, brick_index: int, brick_type: str, dipole_strength
     return f"{prefix} {brick_index + 1:02d}: {brick_type} ({dipole_label})"
 
 
+def _brick_hover_metadata(sample: Dict, brick_index: int, *, prefix: str = "") -> Dict[str, str]:
+    def _pick(field: str):
+        key = f"{prefix}{field}"
+        if key in sample:
+            return sample[key]
+        if prefix != "" and field in sample:
+            return sample[field]
+        return None
+
+    branch = "n/a"
+    branch_values = _pick("branch_kind")
+    if branch_values is not None:
+        arr = np.asarray(branch_values)
+        if arr.ndim >= 1 and brick_index < arr.shape[0]:
+            branch_value = arr[brick_index]
+            if np.asarray(branch_value).shape == ():
+                branch = str(np.asarray(branch_value).item())
+            else:
+                branch = str(branch_value)
+
+    sequence = "n/a"
+    seq_values = _pick("sequence_position")
+    if seq_values is not None:
+        arr = np.asarray(seq_values)
+        if arr.ndim >= 1 and brick_index < arr.shape[0]:
+            seq_value = arr[brick_index]
+            seq_arr = np.asarray(seq_value).reshape(-1)
+            if seq_arr.size > 0:
+                val = float(seq_arr[0])
+                sequence = str(int(round(val))) if abs(val - round(val)) < 1e-6 else f"{val:.3f}"
+
+    return {"branch_kind": branch, "sequence_position": sequence}
+
+
 def _mesh_trace_from_brick(
     sample: Dict,
     anchors: np.ndarray,
@@ -204,6 +238,7 @@ def _mesh_trace_from_brick(
     rotations: np.ndarray,
     dipoles: np.ndarray,
     brick_index: int,
+    prefix: str = "",
 ) -> go.BaseTraceType:
     anchor = np.asarray(anchors[brick_index], dtype=np.float32)
     brick_type = str(types[brick_index])
@@ -241,6 +276,7 @@ def _mesh_trace_from_brick(
     group_key = _paired_legend_group(sample, brick_index)
     strength = float(np.linalg.norm(dipole))
     name = _brick_name(sample, brick_index, brick_type, strength)
+    meta = _brick_hover_metadata(sample, brick_index, prefix=prefix)
     return go.Mesh3d(
         x=x,
         y=y,
@@ -252,6 +288,11 @@ def _mesh_trace_from_brick(
         name=name,
         hovertemplate=(
             f"{name}<br>"
+            f"Brick index: {brick_index}<br>"
+            f"Type: {brick_type}<br>"
+            f"Branch kind: {meta['branch_kind']}<br>"
+            f"Sequence position: {meta['sequence_position']}<br>"
+            f"Anchor: ({anchor[0]:.2f}, {anchor[1]:.2f}, {anchor[2]:.2f})<br>"
             f"Center: ({brick_center[0]:.2f}, {brick_center[1]:.2f}, {brick_center[2]:.2f})<br>"
             f"Dipole strength: {strength:.2f}<extra></extra>"
         ),
@@ -272,6 +313,7 @@ def _surface_trace_from_brick(
     features: np.ndarray,
     dipoles: np.ndarray,
     brick_index: int,
+    prefix: str = "",
 ) -> go.BaseTraceType:
     anchor = np.asarray(anchors[brick_index], dtype=np.float32)
     brick_type = str(types[brick_index])
@@ -298,6 +340,7 @@ def _surface_trace_from_brick(
     group_key = _paired_legend_group(sample, brick_index)
     strength = float(np.linalg.norm(dipole))
     name = _brick_name(sample, brick_index, brick_type, strength)
+    meta = _brick_hover_metadata(sample, brick_index, prefix=prefix)
     return go.Surface(
         x=mesh_x,
         y=mesh_y,
@@ -310,7 +353,16 @@ def _surface_trace_from_brick(
         opacity=0.92,
         uid=f"brick-surface-{brick_index}",
         name=name,
-        hovertemplate=f"{name}<extra></extra>",
+        hovertemplate=(
+            f"{name}<br>"
+            f"Brick index: {brick_index}<br>"
+            f"Type: {brick_type}<br>"
+            f"Branch kind: {meta['branch_kind']}<br>"
+            f"Sequence position: {meta['sequence_position']}<br>"
+            f"Anchor: ({anchor[0]:.2f}, {anchor[1]:.2f}, {anchor[2]:.2f})<br>"
+            f"Center: ({brick_center[0]:.2f}, {brick_center[1]:.2f}, {brick_center[2]:.2f})<br>"
+            f"Dipole strength: {strength:.2f}<extra></extra>"
+        ),
         legendgroup=group_key,
         showlegend=True,
         contours={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
@@ -589,7 +641,15 @@ def _structure_traces(sample: Dict, prefix: str) -> Dict[str, List[go.BaseTraceT
     dipoles = np.asarray(sample.get(f"{prefix}brick_dipoles", np.zeros((len(anchors), 3), dtype=np.float32)), dtype=np.float32)
 
     bricks = [
-        _mesh_trace_from_brick(sample, anchors=anchors, types=types, rotations=rotations, dipoles=dipoles, brick_index=brick_index)
+        _mesh_trace_from_brick(
+            sample,
+            anchors=anchors,
+            types=types,
+            rotations=rotations,
+            dipoles=dipoles,
+            brick_index=brick_index,
+            prefix=prefix,
+        )
         for brick_index in range(len(anchors))
     ]
     surfaces = [
@@ -601,6 +661,7 @@ def _structure_traces(sample: Dict, prefix: str) -> Dict[str, List[go.BaseTraceT
             features=features,
             dipoles=dipoles,
             brick_index=brick_index,
+            prefix=prefix,
         )
         for brick_index in range(len(anchors))
     ]

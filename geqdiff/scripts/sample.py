@@ -210,8 +210,8 @@ def validate_flow_checkpoint_config(config):
     flow_cfg = stack[0]
     if flow_cfg.get("_target_") != "geqdiff.nn.ForwardFlowMatchingModule":
         return
-    target_param = flow_cfg.get("flow_target_parameterization")
-    time_param = flow_cfg.get("flow_time_parameterization")
+    target_param = flow_cfg.get("flow_target_parameterization", "scheduler_velocity")
+    time_param = flow_cfg.get("flow_time_parameterization", "tau")
     if target_param != "scheduler_velocity" or time_param != "tau":
         raise ValueError(
             "This flow checkpoint does not declare the canonical flow parameterization "
