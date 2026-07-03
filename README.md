@@ -38,7 +38,6 @@ Activate the environment before running commands manually:
 
 ```bash
 source .venv-geqdiff/bin/activate
-export PYTHONPATH="$PWD/deps/GEqTrain:${PYTHONPATH:-}"
 ```
 
 ## Repository Layout
