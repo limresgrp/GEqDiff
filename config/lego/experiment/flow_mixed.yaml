@@ -1,0 +1,23 @@
+# @package _global_
+
+defaults:
+  - ../data: mixed
+  - ../model: flow_interaction
+  - ../train: flow
+  - _self_
+
+root: /scratch/angiod/GEqDiff/lego/results
+run_name: __mixed_interaction__
+experiment_description: "Flow matching on secondary-structure LEGO dataset with sequence-position positional embeddings."
+
+seed: 135
+dataset_seed: 179
+default_dtype: float32
+
+sequence_position_num_types: 128
+
+verbose: info
+log_batch_freq: 100
+
+wandb: true
+wandb_project: geqdiff_lego

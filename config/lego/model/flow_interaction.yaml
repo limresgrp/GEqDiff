@@ -1,0 +1,122 @@
+# @package _global_
+defaults:
+  - /common/model/stack_blocks: common
+  - _self_
+
+model:
+  stack:
+    - _target_: geqdiff.nn.ForwardFlowMatchingModule
+      name: flow_matching
+      Tmax: 100
+      use_aot: false
+      flow_target_parameterization: scheduler_velocity
+      flow_time_parameterization: tau
+      t_embedder_kwargs:
+        embedding_dim: 64
+      corrupt_fields:
+        - field: pos
+          out_field: velocity
+          center: true
+          center_mask_field: pocket_mask
+          center_noise: true
+          noise_center_mask_field: ligand_mask
+          mask_field: ligand_mask
+        - field: shape_features
+          out_field: shape_features_velocity
+          center: false
+          mask_field: ligand_mask
+        - field: dipole_direction
+          out_field: dipole_direction_velocity
+          center: false
+          mask_field: ligand_mask
+    - ${stack_blocks.node_input_attrs}
+    - ${stack_blocks.edge_radial_attrs}
+    - ${stack_blocks.edge_angular_attrs}
+    - ${stack_blocks.attrs}
+    - _target_: geqtrain.nn.InteractionModule
+      name: interaction
+      num_layers: 2
+      latent_dim: 512
+      eq_latent_multiplicity: 16
+      use_attention: false
+      use_mace_product: false
+      latent_module: geqtrain.nn.ScalarMLPFunction
+      latent_module_kwargs:
+        mlp_latent_dimensions: [1024]
+        mlp_nonlinearity: silu
+    - _target_: geqtrain.nn.EdgewiseReduce
+      name: edge_pooling
+      field: edge_features
+      out_field: node_features
+      use_attention: false
+    - _target_: geqtrain.nn.ReadoutModule
+      name: position_head
+      field: node_features
+      out_field: velocity
+      out_irreps: 1x1o
+      normalize_equivariant_output: false
+      strict_irreps: false
+      readout_latent: geqtrain.nn.ScalarMLPFunction
+      readout_latent_kwargs:
+        mlp_latent_dimensions: [1024]
+        mlp_nonlinearity: silu
+    - _target_: geqtrain.nn.ReadoutModule
+      name: shape_head
+      field: node_features
+      out_field: shape_features_velocity
+      out_irreps: 1x0e + 1x1o + 1x2e + 1x3o
+      normalize_equivariant_output: false
+      readout_latent: geqtrain.nn.ScalarMLPFunction
+      readout_latent_kwargs:
+        mlp_latent_dimensions: [1024]
+        mlp_nonlinearity: silu
+    - _target_: geqtrain.nn.ReadoutModule
+      name: dipole_direction_head
+      field: node_features
+      out_field: dipole_direction_velocity
+      out_irreps: 1x1o
+      normalize_equivariant_output: false
+      strict_irreps: false
+      readout_latent: geqtrain.nn.ScalarMLPFunction
+      readout_latent_kwargs:
+        mlp_latent_dimensions: [1024]
+        mlp_nonlinearity: silu
+
+r_max: 16
+num_basis: 32
+l_max: 3
+parity: o3_full
+direct_shape_vector: true
+direct_dipole_vector: true
+project_normalized_states: false
+
+node_attributes:
+  sequence_position:
+    attribute_type: categorical
+    embedding_mode: positional
+    num_types: 48
+    embedding_dimensionality: 16
+    positional_base: 10000.0
+  branch_kind:
+    attribute_type: categorical
+    embedding_mode: one_hot
+    num_types: 4
+  ligand_mask:
+    attribute_type: numerical
+    embedding_dimensionality: 1
+  pocket_mask:
+    attribute_type: numerical
+    embedding_dimensionality: 1
+  conditioning:
+    attribute_type: numerical
+    embedding_dimensionality: 64
+
+eq_node_attributes:
+  shape_features:
+    attribute_type: numerical
+    irreps: 1x0e + 1x1o + 1x2e + 1x3o
+    embedding_dimensionality: 16
+  dipole_direction:
+    attribute_type: numerical
+    irreps: 1x1o
+    embedding_dimensionality: 3

@@ -1,0 +1,97 @@
+# @package _global_
+dataset_num_workers: 1
+
+train_dataset_list:
+  - dataset: npz
+    dataset_input: /scratch/angiod/GEqDiff/lego/dataset/train_100_mixed.npz
+    key_mapping:
+      pos: pos
+      pos__mask__: pos__mask__
+      node_types: node_types
+      node_types__mask__: node_types__mask__
+      node_types_true: node_types_true
+      node_types_true__mask__: node_types_true__mask__
+      sequence_position: sequence_position
+      sequence_position__mask__: sequence_position__mask__
+      branch_kind: branch_kind
+      branch_kind__mask__: branch_kind__mask__
+      rotations: rotations
+      rotations__mask__: rotations__mask__
+      shape_scalar_features: shape_scalar_features
+      shape_scalar_features__mask__: shape_scalar_features__mask__
+      shape_features_raw: shape_features
+      shape_features_raw__mask__: shape_features__mask__
+      shape_equiv_features: shape_equiv_features
+      shape_equiv_features__mask__: shape_equiv_features__mask__
+      dipole_strength: dipole_strength
+      dipole_strength__mask__: dipole_strength__mask__
+      dipole_direction: dipole_direction
+      dipole_direction__mask__: dipole_direction__mask__
+      shape_l1_valid: shape_l1_valid
+      shape_l1_valid__mask__: shape_l1_valid__mask__
+      shape_l2_valid: shape_l2_valid
+      shape_l2_valid__mask__: shape_l2_valid__mask__
+      shape_l3_valid: shape_l3_valid
+      shape_l3_valid__mask__: shape_l3_valid__mask__
+      dipole_direction_valid: dipole_direction_valid
+      dipole_direction_valid__mask__: dipole_direction_valid__mask__
+      shape_l1_weight: shape_l1_weight
+      shape_l1_weight__mask__: shape_l1_weight__mask__
+      shape_l2_weight: shape_l2_weight
+      shape_l2_weight__mask__: shape_l2_weight__mask__
+      shape_l3_weight: shape_l3_weight
+      shape_l3_weight__mask__: shape_l3_weight__mask__
+      dipole_direction_weight: dipole_direction_weight
+      dipole_direction_weight__mask__: dipole_direction_weight__mask__
+      ligand_mask: ligand_mask
+      ligand_mask__mask__: ligand_mask__mask__
+      pocket_mask: pocket_mask
+      pocket_mask__mask__: pocket_mask__mask__
+      source_frame_id: source_frame_id
+      split_id: split_id
+      ligand_size: ligand_size
+      sequence_pos_max: sequence_pos_max
+
+train_split_fraction: 0.95
+
+node_fields:
+  - node_types
+  - node_types_true
+  - sequence_position
+  - branch_kind
+  - rotations
+  - shape_scalar_features
+  - shape_features
+  - shape_equiv_features
+  - dipole_strength
+  - dipole_direction
+  - shape_l1_valid
+  - shape_l2_valid
+  - shape_l3_valid
+  - dipole_direction_valid
+  - shape_l1_weight
+  - shape_l2_weight
+  - shape_l3_weight
+  - dipole_direction_weight
+  - ligand_mask
+  - pocket_mask
+  - velocity
+  - shape_scalar_velocity
+  - shape_features_velocity
+  - shape_equiv_velocity
+  - dipole_strength_velocity
+  - dipole_direction_velocity
+
+graph_fields:
+  - source_frame_id
+  - split_id
+  - ligand_size
+  - sequence_pos_max
+
+num_types: 5
+type_names:
+  - 1x1
+  - 1x2
+  - L-shape
+  - T-shape
+  - ligand_unknown

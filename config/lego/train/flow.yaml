@@ -1,0 +1,41 @@
+# @package _global_
+
+loss_coeffs:
+  - velocity:
+    - 1.0
+    - geqdiff.train._loss.MaskedMSELoss
+    - mask_field: ligand_mask
+  - shape_features_velocity:
+    - 1.0
+    - geqdiff.train._loss.MaskedMSELoss
+    - mask_field: ligand_mask
+  - dipole_direction_velocity:
+    - 1.0
+    - geqdiff.train._loss.MaskedMSELoss
+    - mask_field: ligand_mask
+
+metrics_key: validation_loss
+metric_criteria: decreasing
+
+max_epochs: 10000
+learning_rate: 1.e-5
+
+batch_size: 64
+validation_batch_size: 128
+validation_freq: 2
+dataloader_num_workers: 4
+
+optimizer_name: AdamW
+optimizer_params:
+  amsgrad: false
+  betas:
+    - 0.9
+    - 0.999
+  eps: 1.0e-08
+  weight_decay: 0.
+
+lr_scheduler_name: ExponentialLR
+lr_scheduler_gamma: 0.9997
+
+use_ema: false
+warmup_epochs: 5
