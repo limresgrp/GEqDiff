@@ -6,13 +6,13 @@ cd "${ROOT_DIR}"
 
 STANDARD_SOURCE_DATASET="${ROOT_DIR}/lego/lego_dataset_scaffold.npz"
 STANDARD_DIFFUSION_DATASET="${ROOT_DIR}/lego/lego_diffusion_dataset_scaffold.npz"
-STANDARD_EXPERIMENT_CONFIG="${ROOT_DIR}/config/lego/experiment/flow_secondary.yaml"
+STANDARD_EXPERIMENT_CONFIG="${ROOT_DIR}/config/lego/experiment/flow_mixed.yaml"
 STANDARD_RESULTS_ROOT="${ROOT_DIR}/results/lego"
 STANDARD_SAMPLED_DATASET="${ROOT_DIR}/lego/lego_sampled_scaffold_dataset.npz"
 
 SMALL_SOURCE_DATASET="${ROOT_DIR}/lego/lego_dataset_scaffold_tiny.npz"
 SMALL_DIFFUSION_DATASET="${ROOT_DIR}/lego/lego_diffusion_dataset_scaffold_tiny.npz"
-SMALL_EXPERIMENT_CONFIG="${ROOT_DIR}/config/lego/experiment/flow_secondary_shapeonly.yaml"
+SMALL_EXPERIMENT_CONFIG="${ROOT_DIR}/config/lego/experiment/flow_alpha.yaml"
 SMALL_RESULTS_ROOT="${ROOT_DIR}/results/lego"
 SMALL_SAMPLED_DATASET="${ROOT_DIR}/lego/lego_sampled_scaffold_tiny_dataset.npz"
 
@@ -41,14 +41,14 @@ apply_standard_scaffold_preset() {
 }
 
 apply_tiny_scaffold_preset() {
-  CURRENT_PRESET_LABEL="tiny-scaffold-overfit"
+  CURRENT_PRESET_LABEL="tiny-alpha-overfit"
   SOURCE_DATASET_PATH="${SMALL_SOURCE_DATASET}"
   DIFFUSION_DATASET_PATH="${SMALL_DIFFUSION_DATASET}"
   EXPERIMENT_CONFIG_PATH="${SMALL_EXPERIMENT_CONFIG}"
   RESULTS_ROOT_PATH="${SMALL_RESULTS_ROOT}"
   SAMPLED_DATASET_PATH="${SMALL_SAMPLED_DATASET}"
   DEFAULT_SOURCE_SAMPLES="16"
-  DEFAULT_SCAFFOLD_FAMILY="mixed"
+  DEFAULT_SCAFFOLD_FAMILY="alpha_helix"
   DEFAULT_MIN_NODES="10"
   DEFAULT_MAX_NODES="16"
 }
