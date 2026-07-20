@@ -204,12 +204,3 @@ metadata, and metric panels.
 The current model consumes `sequence_position` and `branch_kind` as categorical
 node attributes. These fields must be present in datasets and are preserved by
 the dataset builder and sampler.
-
-## Notes
-
-- The active LEGO generator is deterministic by design, to reduce hidden
-  ambiguity in the training target.
-- The old shell/solid benchmark and decoupled scalar/equivariant shape/dipole
-  configs are no longer part of the active workflow.
-- Large generated datasets and training results should stay outside git, for
-  example under `/scratch/...` or `results/`.
