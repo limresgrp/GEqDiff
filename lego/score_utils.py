@@ -448,6 +448,19 @@ def _shape_score(
     }
 
 
+def _dipole_energy_metric(metrics: Dict[str, Any]) -> float:
+    """Return the dipole energy value regardless of legacy/current metric name."""
+    for key in ("weighted_dipole_energy", "dipole_total_energy", "total_energy"):
+        value = metrics.get(key, None)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def _dipole_score(
     sampled_metrics: Dict[str, Any],
     original_metrics: Dict[str, Any],
@@ -458,7 +471,7 @@ def _dipole_score(
     sampled_dip = np.asarray(sample.get("brick_dipoles", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
     original_dip = np.asarray(sample.get("original_brick_dipoles", np.zeros_like(sampled_dip)), dtype=np.float32)
     dip_compare = _dipole_vector_similarity(sampled_dip, original_dip, mask=np.asarray(mask, dtype=bool))
-    energy_delta = float(sampled_metrics.get("weighted_dipole_energy", 0.0) - original_metrics.get("weighted_dipole_energy", 0.0))
+    energy_delta = float(_dipole_energy_metric(sampled_metrics) - _dipole_energy_metric(original_metrics))
     energy_term = float(np.exp(-abs(energy_delta) / DIPOLE_ENERGY_DELTA_SCALE))
     cosine_term = 0.5 * (float(dip_compare["dipole_vector_cosine"]) + 1.0)
     magnitude_term = float(np.exp(-((float(dip_compare["dipole_magnitude_rmse"]) / DIPOLE_MAG_RMSE_SCALE) ** 2)))
@@ -615,12 +628,8 @@ def evaluate_sample_scores(sample: Dict[str, Any], dipole_config: DipoleAssignme
     original["absolute_scores"] = original_absolute_scores
 
     payload["original"] = original
-    sampled_weighted_energy = float(
-        sampled["metrics"].get("weighted_dipole_energy", sampled["metrics"].get("dipole_total_energy", 0.0))
-    )
-    original_weighted_energy = float(
-        original["metrics"].get("weighted_dipole_energy", original["metrics"].get("dipole_total_energy", 0.0))
-    )
+    sampled_weighted_energy = _dipole_energy_metric(sampled["metrics"])
+    original_weighted_energy = _dipole_energy_metric(original["metrics"])
     payload["compare"] = {
         "score_delta": {
             "validity": float(sampled["scores"]["validity"] - original["scores"]["validity"]),
