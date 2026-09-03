@@ -125,6 +125,14 @@ def make_batch_from_atom_counts(atom_counts: torch.Tensor, device: str):
     return torch.repeat_interleave(torch.arange(batch_size, device=device), atom_counts)
 
 
+def make_local_node_indices(atom_counts: torch.Tensor, device: str):
+    """Return graph-local node indices (0..num_nodes-1) for a flat batch."""
+    parts = [torch.arange(int(count), device=device) for count in atom_counts.tolist()]
+    if not parts:
+        return torch.empty(0, dtype=torch.long, device=device)
+    return torch.cat(parts)
+
+
 def split_by_atom_counts(values, atom_counts: torch.Tensor):
     parts = []
     offset = 0
@@ -192,6 +200,17 @@ def infer_node_type_metadata(config, node_types_map_arg: Optional[str]):
     return node_types_map, num_types
 
 
+def infer_node_indices_metadata(config):
+    node_attributes = config.get("node_attributes", {})
+    node_indices_config = node_attributes.get("node_indices")
+    if node_indices_config is None:
+        return False, None
+    if not isinstance(node_indices_config, dict):
+        raise TypeError("config.node_attributes.node_indices must be a mapping.")
+    num_types = node_indices_config.get("num_types")
+    return True, int(num_types) if num_types is not None else None
+
+
 def infer_model_Tmax(config):
     model_cfg = config.get("model", {})
     stack = model_cfg.get("stack", [])
@@ -218,6 +237,14 @@ def validate_flow_checkpoint_config(config):
             "(flow_target_parameterization='scheduler_velocity', flow_time_parameterization='tau'). "
             "Retrain with the updated flow config before sampling."
         )
+
+
+def checkpoint_uses_flow_matching(config) -> bool:
+    model_cfg = config.get("model", {})
+    stack = model_cfg.get("stack", [])
+    if not (isinstance(stack, list) and len(stack) > 0 and isinstance(stack[0], dict)):
+        return False
+    return stack[0].get("_target_") == "geqdiff.nn.ForwardFlowMatchingModule"
 
 
 def get_flow_tau_tensor(scheduler: FlowMatchingScheduler, step: int, batch_size: int, device: str):
@@ -276,6 +303,8 @@ def sample_from_model(
     save_npz: bool = False,
     field: Optional[str] = None,
     predict_node_types_field: Optional[str] = None,
+    include_node_indices: bool = False,
+    node_indices_num_types: Optional[int] = None,
 ):
     """
     Main function to perform reverse diffusion and generate samples in batch.
@@ -303,6 +332,15 @@ def sample_from_model(
         raise ValueError(
             f"node_types has {int(node_types_batch.shape[0])} entries but atom_counts requires {total_nodes} nodes."
         )
+    node_indices_batch = None
+    if include_node_indices:
+        max_atoms = int(atom_counts.max().item())
+        if node_indices_num_types is not None and max_atoms > node_indices_num_types:
+            raise ValueError(
+                f"The checkpoint's node_indices vocabulary has {node_indices_num_types} entries, "
+                f"but sampling requested a molecule with {max_atoms} atoms."
+            )
+        node_indices_batch = make_local_node_indices(atom_counts, device=device)
 
     # 1. Define the starting point x_t
     T_max = sampler.T
@@ -408,6 +446,8 @@ def sample_from_model(
                 AtomicDataDict.EDGE_INDEX_KEY: edge_index,
                 AtomicDataDict.T_SAMPLED_KEY: t_field,
             }
+            if node_indices_batch is not None:
+                data["node_indices"] = node_indices_batch
 
             out_dict = model(data)
             model_field_pred = out_dict[field]
@@ -443,9 +483,7 @@ def sample_from_model(
             if save_trajectory:
                 trajectory.append(capture_positions_for_traj(x_t))
         except Exception as e:
-            print(f"\nAn error occurred during sampling at step t={t}: {e}")
-            print("Stopping generation and saving the partial trajectory.")
-            break
+            raise RuntimeError(f"Sampling failed at step t={t}; no partial sample will be saved.") from e
 
     print("Sampling complete.")
     npz_data = None
@@ -481,7 +519,11 @@ def main(args=None):
     # --- 1. Load Model and Initial Structure ---
     
     model, config, _ = CheckpointHandler.load_model(args.model, device=args.device)
+    if args.sampler == "auto":
+        args.sampler = "flow" if checkpoint_uses_flow_matching(config) else "ddpm"
+        print(f"Auto-selected sampler: {args.sampler}")
     node_types_map, num_types = infer_node_type_metadata(config, args.node_types_map)
+    include_node_indices, node_indices_num_types = infer_node_indices_metadata(config)
     if args.sampler == "flow":
         validate_flow_checkpoint_config(config)
 
@@ -644,6 +686,8 @@ def main(args=None):
             save_npz=args.save_npz,
             field=args.field,
             predict_node_types_field=args.predict_node_types_field,
+            include_node_indices=include_node_indices,
+            node_indices_num_types=node_indices_num_types,
         )
         final_batches.extend(final_positions)
         final_node_types_batches.extend(final_node_types)
@@ -808,7 +852,7 @@ def parse_args(arg_list=None):
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size for sampling. Defaults to --num_samples.")
     parser.add_argument("--t_init", type=int, default=None, help="Discrete scheduler step to start from. For flow matching this is converted to the corresponding tau value; if not set, sampling starts from pure noise.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for sampling.")
-    parser.add_argument("--sampler", type=str, default="ddpm", choices=["ddpm", "ddim", "rectified", "flow"], help="Sampler to use.")
+    parser.add_argument("--sampler", type=str, default="auto", choices=["auto", "ddpm", "ddim", "rectified", "flow"], help="Sampler to use. Default 'auto' selects flow for flow-matching checkpoints and ddpm otherwise.")
     parser.add_argument("-T", "--Tmax", type=int, default=None, help="Maximum number of diffusion timesteps. Defaults to the model's Tmax.")
     parser.add_argument("-f", "--field", type=str, default=None, help="Prediction field to read from the model. Defaults to 'noise' for diffusion samplers and 'velocity' for flow matching.")
     parser.add_argument("--steps", type=int, default=None, help="Number of steps for DDIM, RectifiedFlow, or flow matching sampling.")

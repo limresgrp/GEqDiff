@@ -1,12 +1,12 @@
 .vscode/
 alanine/
 qm9/
-old_config/
 deployed/
 sampling_results/
 wandb/
 results/
 samples/
+paper/
 *.ipynb
 *.html
 

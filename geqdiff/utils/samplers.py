@@ -1,7 +1,7 @@
 import torch
 from abc import ABC, abstractmethod
 
-from geqdiff.utils.noise_schedulers import FlowMatchingScheduler, NoiseScheduler
+from geqdiff.utils.noise_schedulers import FlowMatchingScheduler
 
 
 
