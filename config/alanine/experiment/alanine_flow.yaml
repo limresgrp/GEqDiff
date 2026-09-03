@@ -1,0 +1,23 @@
+# @package _global_
+
+defaults:
+  - ../data:  alanine
+  - ../model: flow_model
+  - ../train: flow
+  - _self_
+
+# --- General --- #
+root: results/
+run_name: alanine_tutorial
+experiment_description: "Unconditioned Flow Matching on Alanine Dipeptide"
+
+seed: 13
+dataset_seed: 17
+default_dtype: float32
+
+# --- Logging --- #
+verbose: info
+log_batch_freq: 1000
+
+wandb: false
+wandb_project: alanine_flow_matching

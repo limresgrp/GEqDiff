@@ -1,0 +1,37 @@
+# @package _global_
+dataset_num_workers: 1
+
+train_dataset_list:
+  - dataset: npz
+    dataset_input: data/train_750.npz
+    key_mapping:
+      coords: pos
+      atom_types: node_types
+      atom_indices: node_indices
+
+test_dataset_list:
+  - dataset: npz
+    dataset_input: data/train_750.npz
+    key_mapping:
+      coords: pos
+      atom_types: node_types
+      atom_indices: node_indices
+
+n_train: [650]
+n_val: [100]
+
+node_fields:
+  - node_types
+  - node_indices
+  - velocity
+  - conditioning
+
+fixed_fields:
+  - node_types
+  - node_indices
+
+num_types: 3
+type_names:
+  - C
+  - N
+  - O

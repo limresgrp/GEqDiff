@@ -1,0 +1,44 @@
+# @package _global_
+
+# --- Loss --- #
+loss_coeffs:
+  - velocity:
+    - 1.
+    - geqtrain.train.LogCoshLoss
+
+# --- Metrics --- #
+metrics_components:
+  - velocity:
+    - L1Loss
+    - PerSpecies: True
+
+metrics_key: validation_loss
+metric_criteria: decreasing
+
+# --- Training --- #
+max_epochs: 5000
+learning_rate: 5.e-4
+
+batch_size: 128
+validation_batch_size: 256
+validation_freq: 10
+dataloader_num_workers: 8
+
+# --- Optimizer & Scheduler --- #
+optimizer_name: AdamW
+optimizer_params:
+  amsgrad: false
+  betas:
+    - 0.9
+    - 0.999
+  eps: 1.0e-08
+  weight_decay: 0.
+
+lr_scheduler_name: ExponentialLR
+lr_scheduler_gamma: 0.999
+
+# max_gradient_norm: 1.0
+# gradient_clipping_mode: fixed
+
+use_ema: true
+warmup_epochs: 10
