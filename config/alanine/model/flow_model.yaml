@@ -43,7 +43,7 @@ model:
       name: velocity_head
       field: node_features
       out_field: velocity
-      out_irreps: 1x1o
+      out_irreps: 1x1e
       normalize_equivariant_output: false
       readout_latent: geqtrain.nn.ScalarMLPFunction
       readout_latent_kwargs:
@@ -53,7 +53,7 @@ model:
 r_max: 16.0
 num_basis: 32
 l_max: 2
-parity: o3_full
+parity: so3
 
 # -------- #
 #  Inputs  #

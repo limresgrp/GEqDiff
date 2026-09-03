@@ -3,8 +3,7 @@
 # --- Loss --- #
 loss_coeffs:
   - velocity:
-    - 1.
-    - geqtrain.train.LogCoshLoss
+    - MSELoss
 
 # --- Metrics --- #
 metrics_components:
