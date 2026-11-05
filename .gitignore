@@ -9,6 +9,7 @@ samples/
 paper/
 *.ipynb
 *.html
+graphify-out/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
