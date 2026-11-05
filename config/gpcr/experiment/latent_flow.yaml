@@ -1,0 +1,24 @@
+# @package _global_
+
+defaults:
+  - ../data: cg_flow
+  - ../model: latent_flow
+  - ../train: flow
+  - _self_
+
+root: results/gpcr_latent_flow
+run_name: gpcr_latent_flow_poc
+experiment_description: >
+  E(3)-equivariant flow matching on C-alpha coordinates and side-chain
+  direction vectors with an explicit scalar latent bottleneck conditioning a
+  second equivariant decoder.
+
+seed: 13
+dataset_seed: 17
+default_dtype: float32
+
+verbose: info
+log_batch_freq: 100
+
+wandb: false
+wandb_project: gpcr_latent_flow

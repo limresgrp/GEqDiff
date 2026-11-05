@@ -1,0 +1,83 @@
+# @package _global_
+
+dataset_num_workers: 4
+
+train_dataset_list:
+  - dataset: npz
+    dataset_input: data/gpcr1/train.npz
+    key_mapping:
+      pos: pos
+      node_types: node_types
+      sequence_position: sequence_position
+      sidechain_direction: sidechain_direction
+      edge_index: edge_index
+      seq_edge_features: seq_edge_features
+      time: time
+      frame_index: frame_index
+
+validation_dataset_list:
+  - dataset: npz
+    dataset_input: data/gpcr1/val.npz
+    key_mapping:
+      pos: pos
+      node_types: node_types
+      sequence_position: sequence_position
+      sidechain_direction: sidechain_direction
+      edge_index: edge_index
+      seq_edge_features: seq_edge_features
+      time: time
+      frame_index: frame_index
+
+# Fields produced by the flow module or intermediate model blocks also need to
+# be registered so GEqTrain knows their graph level.  In particular,
+# latent_node must be a node field for decoder conditioning.
+node_fields:
+  - node_types
+  - sequence_position
+  - sidechain_direction
+  - conditioning
+  - velocity
+  - sidechain_direction_velocity
+  - encoder_node_features
+  - latent_node
+  - decoder_node_features
+
+edge_fields:
+  - seq_edge_features
+  - encoder_edge_features
+  - decoder_edge_features
+
+graph_fields:
+  - time
+  - frame_index
+
+# These arrays are stored once per NPZ, not once per trajectory frame.  The
+# matching `fixed: true` attribute entries in the model config make this
+# unambiguous even when N_frames happens to equal N_residues.
+fixed_fields:
+  - node_types
+  - sequence_position
+
+num_types: 21
+type_names:
+  - X
+  - ALA
+  - ARG
+  - ASN
+  - ASP
+  - CYS
+  - GLN
+  - GLU
+  - GLY
+  - HIS
+  - ILE
+  - LEU
+  - LYS
+  - MET
+  - PHE
+  - PRO
+  - SER
+  - THR
+  - TRP
+  - TYR
+  - VAL
