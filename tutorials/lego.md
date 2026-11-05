@@ -155,6 +155,17 @@ The HTML compares original and sampled structures, exposes saved trajectory
 frames, shows the voxelized final result when available, and displays per-sample
 metrics and brick metadata.
 
+To generate a separate visual primer explaining how the 16 spherical-harmonic
+coefficients encode the available LEGO shapes, run:
+
+```bash
+python lego/plot_spherical_harmonics.py
+```
+
+Open `tutorials/spherical_harmonics/index.html` to navigate the basis-function,
+weighted-combination, and smooth-surface-to-brick pages. Pass
+`--plotlyjs inline` to make every page work without an internet connection.
+
 ## 8. Available Experiments
 
 - `config/lego/experiment/flow_mixed.yaml`: mixed alpha-helix-like and
