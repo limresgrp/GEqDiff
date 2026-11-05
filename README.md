@@ -60,6 +60,9 @@ source .venv-geqdiff/bin/activate
   Ramachandran density estimates.
 - [LEGO flow matching](tutorials/lego.md): generate and inspect datasets, train,
   sample, evaluate, and visualize LEGO structures.
+- [GPCR latent flow experiment](docs/gpcr_latent_flow.md): build the
+  coarse-grained trajectory dataset, configure the encoder-bottleneck-decoder
+  model, run a smoke test, and track the remaining latent/diffusion-map work.
 
 The LEGO workflow is also available through the interactive `./lego_menu.sh`
 wrapper.
